@@ -173,6 +173,164 @@ INVOICE_FIELDS: Dict[str, FieldConfig] = {
         required=True
     ),
 
+    "net_amount": FieldConfig(
+        name="net_amount",
+        display_name="Net Amount",
+        field_type=FieldType.NUMBER,
+        description="Total amount before tax",
+        extraction_guidelines=[
+            "**ANCHOR LABELS**: 'Sub Total', 'Taxable Value', 'Net Total', 'Total before Tax'"
+        ]
+    ),
+    
+    "tax_amount": FieldConfig(
+        name="tax",
+        display_name="Tax Amount",
+        field_type=FieldType.NUMBER,
+        description="Total tax amount",
+        extraction_guidelines=[
+            "**ANCHOR LABELS**: 'Tax Total', 'VAT', 'GST Total', 'IGST+CGST+SGST', 'Total Tax'"
+        ]
+    ),
+    
+    "discount": FieldConfig(
+        name="discount",
+        display_name="Discount Amount",
+        field_type=FieldType.NUMBER,
+        description="Total discount amount",
+        extraction_guidelines=[
+            "**ANCHOR LABELS**: 'Discount', 'Less', 'Rebate'",
+            "**NOTE**: Return positive number"
+        ]
+    ),
+    
+    "shipping_charges": FieldConfig(
+        name="shipping_charges",
+        display_name="Shipping Charges",
+        field_type=FieldType.NUMBER,
+        description="Total shipping/freight charges",
+        extraction_guidelines=[
+            "**ANCHOR LABELS**: 'Freight', 'Shipping', 'Transportation', 'Delivery Charge'"
+        ]
+    ),
+    
+    "payment_terms": FieldConfig(
+        name="payment_terms",
+        display_name="Payment Terms",
+        field_type=FieldType.STRING,
+        description="Payment conditions",
+        extraction_guidelines=[
+            "**VALUES**: 'Net 30', 'Immediate', 'Due on Receipt'",
+            "**ANCHOR LABELS**: 'Payment Terms', 'Terms'"
+        ]
+    ),
+    
+    "due_date": FieldConfig(
+        name="due_date",
+        display_name="Due Date",
+        field_type=FieldType.DATE,
+        description="Payment due date",
+        extraction_guidelines=[
+            "**ANCHOR LABELS**: 'Due Date', 'Pay by', 'Payment Due'"
+        ]
+    ),
+
+    # --- INDIA GST FIELDS START ---
+    
+    "vendor_gstin": FieldConfig(
+        name="vendor_gstin",
+        display_name="Vendor GST Number",
+        field_type=FieldType.STRING,
+        description="GST Identification Number of the Supplier",
+        extraction_guidelines=[
+            "**ANCHOR LABELS**: 'GSTIN', 'GST No.', 'Vendor GST', 'GST#', 'GST Registration No'",
+            "**FORMAT**: 15 alphanumeric characters (e.g., 27AAAAA0000A1Z5)",
+            "**LOCATION**: Header or under Seller details",
+            "**VALIDATION**: Starts with 2-digit state code"
+        ]
+    ),
+
+    "billing_gstin": FieldConfig(
+        name="billing_gstin",
+        display_name="Billing GST Number",
+        field_type=FieldType.STRING,
+        description="GST Identification Number of the Buyer",
+        extraction_guidelines=[
+            "**ANCHOR LABELS**: 'Customer GST', 'Buyer GSTIN', 'GST No.', 'GSTIN'",
+            "**LOCATION**: 'Bill To' section or under Buyer details",
+            "**FORMAT**: 15 alphanumeric characters"
+        ]
+    ),
+    
+    "sgst_percentage": FieldConfig(
+        name="sgst_percentage",
+        display_name="SGST Rate",
+        field_type=FieldType.NUMBER,
+        description="State Goods and Service Tax Rate (%)",
+        extraction_guidelines=[
+            "**ANCHOR LABELS**: 'SGST @', 'SGST Rate', 'SGST %'",
+            "**FORMAT**: Number only (e.g. 9 for 9%)"
+        ]
+    ),
+    
+    "cgst_percentage": FieldConfig(
+        name="cgst_percentage",
+        display_name="CGST Rate",
+        field_type=FieldType.NUMBER,
+        description="Central Goods and Service Tax Rate (%)",
+        extraction_guidelines=[
+            "**ANCHOR LABELS**: 'CGST @', 'CGST Rate', 'CGST %'",
+            "**FORMAT**: Number only"
+        ]
+    ),
+    
+    "igst_percentage": FieldConfig(
+        name="igst_percentage",
+        display_name="IGST Rate",
+        field_type=FieldType.NUMBER,
+        description="Integrated Goods and Service Tax Rate (%)",
+        extraction_guidelines=[
+            "**ANCHOR LABELS**: 'IGST @', 'IGST Rate', 'IGST %'",
+            "**FORMAT**: Number only"
+        ]
+    ),
+
+    "sgst_total": FieldConfig(
+        name="sgst_total",
+        display_name="SGST Amount",
+        field_type=FieldType.NUMBER,
+        description="Total SGST Amount",
+        extraction_guidelines=[
+            "**ANCHOR LABELS**: 'SGST Amount', 'SGST Amt', 'SGST'",
+            "**LOCATION**: Bottom tax summary or footer",
+            "**NEGATIVE RULE**: Not the rate"
+        ]
+    ),
+
+    "cgst_total": FieldConfig(
+        name="cgst_total",
+        display_name="CGST Amount",
+        field_type=FieldType.NUMBER,
+        description="Total CGST Amount",
+        extraction_guidelines=[
+            "**ANCHOR LABELS**: 'CGST Amount', 'CGST Amt', 'CGST'",
+            "**LOCATION**: Bottom tax summary or footer"
+        ]
+    ),
+    
+    "igst_total": FieldConfig(
+        name="igst_total",
+        display_name="IGST Amount",
+        field_type=FieldType.NUMBER,
+        description="Total IGST Amount",
+        extraction_guidelines=[
+            "**ANCHOR LABELS**: 'IGST Amount', 'IGST Amt', 'IGST'",
+            "**LOCATION**: Bottom tax summary"
+        ]
+    ),
+    
+    # --- INDIA GST FIELDS END ---
+
     "invoice_toi": FieldConfig(
         name="invoice_toi",
         display_name="Terms of Delivery (TOI)",
@@ -1073,7 +1231,8 @@ INVOICE_PROMPT = generate_extraction_prompt(
         "**UNIVERSAL HEURISTIC**: Use visual alignment logic for tables.",
         "**ANCHOR LOGIC**: Logo usually denotes Seller. 'To' usually denotes Buyer.",
         "**MATH CHECK**: Total Amount should equal sum of Line Items (approx).",
-        "**DATES**: Standardize all dates to YYYY-MM-DD."
+        "**DATES**: Standardize all dates to YYYY-MM-DD.",
+        "**INDIA GST RULE**: Look specifically for GSTINs (15 chars starting with state code e.g., 27...). If SGST/CGST/IGST are split, extract them individually into their specific fields."
     ],
     exclude_fields=["invoice_toi", "invoice_po_date"] # Excluded from main pass if doing 2-pass extraction
 )
@@ -1102,4 +1261,4 @@ GRN_PROMPT = generate_extraction_prompt(
         "**QC DATA**: Extract text from 'Remarks' or 'Notes' columns regarding damage, wet cartons, or quality issues.",
         "**Invoice**: Extract 'Vehicle Reg' (Truck Number) and 'Carrier' if listed in the header."
     ]
-)
+) 

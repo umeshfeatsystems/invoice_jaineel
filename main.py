@@ -227,6 +227,8 @@ class InvoiceItem(BaseModel):
     line_amount: float = Field(..., description="Line Amount")
     item_po_no: Optional[str] = Field(None, description="Customer Purchase Order Number")
     part_no: Optional[str] = Field(None, description="Part Number")
+    # Added HSN Code for India
+    hsn_code: Optional[str] = Field(None, description="HSN/SAC Code")
 
 class Invoice(BaseModel):
     name: str = Field(..., description="Vendor Name")
@@ -236,6 +238,12 @@ class Invoice(BaseModel):
     shipping_addr: Optional[str] = Field(None, description="Shipping Address")
     invoice_no: str = Field(..., description="Invoice Number")
     po_no: Optional[str] = Field(None, description="Purchase Order Number")
+    
+    # --- India GST Fields ---
+    vendor_gstin: Optional[str] = Field(None, description="Vendor GST Number")
+    billing_gstin: Optional[str] = Field(None, description="Billing/Customer GST Number")
+    # ------------------------
+
     vendor_vat_no: Optional[str] = Field(None, description="Vendor VAT Number")
     billing_vat_no: Optional[str] = Field(None, description="Billing VAT Number")
     date: str = Field(..., description="Document Date (YYYY-MM-DD)")
@@ -243,8 +251,18 @@ class Invoice(BaseModel):
     shipping_date: Optional[str] = Field(None, description="Shipping Date (YYYY-MM-DD)")
     payment_terms: Optional[str] = Field(None, description="Payment Terms")
     payment_addr: Optional[str] = Field(None, description="Payment Address")
+    
+    # --- Tax Details ---
     tax: Optional[float] = Field(None, description="Tax Amount")
     tax_rate: Optional[float] = Field(None, description="Tax Rate")
+    sgst_percentage: Optional[float] = Field(None, description="SGST Rate %")
+    cgst_percentage: Optional[float] = Field(None, description="CGST Rate %")
+    igst_percentage: Optional[float] = Field(None, description="IGST Rate %")
+    sgst_total: Optional[float] = Field(None, description="Total SGST Amount")
+    cgst_total: Optional[float] = Field(None, description="Total CGST Amount")
+    igst_total: Optional[float] = Field(None, description="Total IGST Amount")
+    # -------------------
+
     net_amount: Optional[float] = Field(None, description="Net Amount")
     discount: Optional[float] = Field(None, description="Discount Amount")
     shipping_charges: Optional[float] = Field(None, description="Shipping Charges")
