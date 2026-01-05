@@ -1,0 +1,40 @@
+# --- Python ---
+__pycache__/
+*.py[cod]
+*$py.class
+*.manifest
+*.spec
+benchmark_results.txt
+benchmark_results.txt
+
+# --- Virtual Environments ---
+venv/
+.venv/
+env/
+.env/
+
+# --- Environment Variables (CRITICAL: Never push API keys) ---
+.env
+.env.local
+
+# --- VS Code Settings ---
+.vscode/
+
+# --- Logs ---
+*.log
+
+# --- Data & Invoices (Don't push local test data) ---
+*.csv
+*.xlsx
+*.xls
+*.pdf
+
+
+# --- Jupyter Notebooks (Optional: ignore checkpoints) ---
+.ipynb_checkpoints/
+
+# --- OS Generated Files ---
+.DS_Store
+Thumbs.db
+
+tests
