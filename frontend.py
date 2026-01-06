@@ -47,7 +47,6 @@ def recursive_display(data):
     Recursively displays dictionary data. 
     Simple fields are shown in columns.
     Nested dictionaries are shown as subsections.
-    Handles the new nested structure from main.py (Buyer, Vendor, etc.)
     """
     if not isinstance(data, dict):
         return
@@ -64,7 +63,6 @@ def recursive_display(data):
             val = simple_fields[key]
             with cols[i % 3]:
                 st.caption(key.replace('_', ' ').title())
-                # Handle potentially long text or formatting
                 if isinstance(val, float):
                     st.markdown(f"**{val:,.2f}**")
                 else:
@@ -73,7 +71,6 @@ def recursive_display(data):
     # 3. Display Nested Objects (Recursion)
     if nested_objects:
         for key, val in nested_objects.items():
-            # Add a sub-header for the object (e.g. "Buyer", "Vendor", "Bank Details")
             st.markdown(f"#### {key.replace('_', ' ').title()}")
             recursive_display(val)
 
@@ -97,30 +94,53 @@ def main():
             st.success("Backend Online")
         except:
             st.error("Backend Offline")
+            
+        if st.button("🔄 Reset / Clear Cache"):
+            if 'extraction_results' in st.session_state:
+                del st.session_state['extraction_results']
+            st.rerun()
 
     # ---------------- Main UI ----------------
     st.title("📄 Invoice Document Processor")
     st.markdown("Upload a PDF containing Invoices, Purchase Orders, or GRNs.")
     
-    uploaded_file = st.file_uploader("Upload PDF", type=["pdf"])
+    # Use a specific key for the uploader to help manage state
+    uploaded_file = st.file_uploader("Upload PDF", type=["pdf"], key="pdf_uploader")
 
     if uploaded_file:
         st.write(f"**File:** {uploaded_file.name}")
         st.write(f"**Size:** {round(uploaded_file.size / 1024, 2)} KB")
 
+        # Logic to detect new file and clear old results
+        if 'last_uploaded_file' not in st.session_state or st.session_state.last_uploaded_file != uploaded_file.name:
+            st.session_state.last_uploaded_file = uploaded_file.name
+            if 'extraction_results' in st.session_state:
+                del st.session_state['extraction_results']
+
+        # Start Processing Button
         if st.button("🚀 Start Processing"):
             with st.spinner("Processing document... (Classification -> Splitting -> Parallel Extraction)"):
                 try:
+                    # Reset pointer to 0 just in case
+                    uploaded_file.seek(0)
                     files = {"file": (uploaded_file.name, uploaded_file, "application/pdf")}
+                    
                     response = requests.post(PROCESS_ENDPOINT, files=files, timeout=600)
 
                     if response.status_code == 200:
-                        display_results(response.json())
+                        # STORE RESULT IN SESSION STATE
+                        st.session_state['extraction_results'] = response.json()
                     else:
                         st.error(f"Error {response.status_code}: {response.text}")
 
                 except Exception as e:
                     st.error(f"Connection Error: {str(e)}")
+
+    # ---------------- Display Results from Session State ----------------
+    # This block runs even after reruns (e.g., clicking checkboxes)
+    if 'extraction_results' in st.session_state:
+        display_results(st.session_state['extraction_results'])
+
 
 # =====================================================
 # RESULTS
@@ -130,7 +150,6 @@ def display_results(result):
     if result.get("classification"):
         st.markdown("### 📑 Classification Map")
         rows = []
-        # Support new schema structure if needed, but generic dict handling works
         class_data = result["classification"]
         for dtype, ranges in class_data.items():
             if not ranges: continue
@@ -192,15 +211,14 @@ def render_docs(docs, label):
         error = doc.get("error")
         pages = doc.get("page_range", [0, 0])
 
-        # Smart Reference ID extraction based on document type
-        # Updated to match keys in main.py Pydantic models
+        # Smart Reference ID
         ref = "Unknown Ref"
         if isinstance(data, dict):
             ref = (
-                data.get("invoice_no") or      # New Invoice Schema
-                data.get("po_number") or       # New PO Schema
-                data.get("grn_number") or      # GRN Schema
-                data.get("invoice_number") or  # Old fallback
+                data.get("invoice_no") or      
+                data.get("po_number") or       
+                data.get("grn_number") or      
+                data.get("invoice_number") or  
                 "Unknown Ref"
             )
 
@@ -210,9 +228,8 @@ def render_docs(docs, label):
                 st.error(f"Extraction Failed: {error}")
                 continue
 
-            # 1. Header Details (Using Recursive Display for nested objects)
+            # 1. Header Details
             st.markdown("#### Header Details")
-            # Filter out 'items' from header display to avoid clutter
             header_data = {k: v for k, v in data.items() if k != 'items'}
             recursive_display(header_data)
 
@@ -221,16 +238,19 @@ def render_docs(docs, label):
             st.markdown(f"#### Line Items ({len(items)})")
 
             if items:
-                # Convert list of dicts to DataFrame
                 df_items = pd.DataFrame(items)
                 st.dataframe(df_items, use_container_width=True, hide_index=True)
             else:
                 st.info("No line items found.")
 
-            # 3. Raw JSON View
+            # 3. Raw JSON View (Persisted)
             st.divider()
+            # This checkbox triggers a rerun, but since data is in session_state,
+            # display_results is called again, and the checkbox state is maintained.
             if st.checkbox("Show Raw JSON", key=f"raw_{label}_{i}_{ref}"):
+                st.markdown("```json")
                 st.json(doc)
+                st.markdown("```")
 
 if __name__ == "__main__":
     main()
