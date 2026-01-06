@@ -1,11 +1,8 @@
 """
-Optimized Invoice Document Processing Pipeline
-=================================================
-Key Features:
-1. Universal Routing (Invoice, PO, GRN) - Vendor Agnostic
-2. Parallel extraction (asyncio.gather) with Concurrency Control
-3. Dynamic Prompt Selection based on Classification
-4. Robust Error Handling for API Instability
+Single Endpoint Invoice Extraction API (Synchronous)
+====================================================
+Input: PDF File via POST
+Output: Consolidated JSON Response (No Polling)
 """
 
 import os
@@ -15,21 +12,22 @@ import uuid
 import logging
 import asyncio
 import aiofiles
+import shutil
 import random
 from concurrent.futures import ThreadPoolExecutor
-from typing import List, Tuple, Optional, Dict, Any
+from typing import List, Optional, Dict, Any, Tuple
 from datetime import datetime
 
 import uvicorn
 import google.generativeai as genai
-from fastapi import FastAPI, UploadFile, File, HTTPException, Request, Form
+from fastapi import FastAPI, UploadFile, File, HTTPException, Form
 from fastapi.responses import JSONResponse
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel, Field
 from pypdf import PdfReader, PdfWriter
 from dotenv import load_dotenv
 
-# Import prompts from centralized config
+# Import prompts from centralized config (assuming services folder exists)
 from services.prompt_config import (
     INVOICE_PROMPT, 
     PO_PROMPT,
@@ -37,8 +35,13 @@ from services.prompt_config import (
     CLASSIFICATION_PROMPT
 )
 
-# Import enhanced rate limiter with release function
-from services.rate_limiter import initialize_rate_limiter, get_rate_limiter, release_rate_limit, get_rate_limit_stats
+# Import enhanced rate limiter (assuming services folder exists)
+from services.rate_limiter import (
+    initialize_rate_limiter, 
+    get_rate_limiter, 
+    release_rate_limit, 
+    get_rate_limit_stats
+)
 
 # ==========================================
 # 1. CONFIGURATION & ENVIRONMENT
@@ -46,50 +49,34 @@ from services.rate_limiter import initialize_rate_limiter, get_rate_limiter, rel
 load_dotenv()
 
 def setup_logging():
-    log_level = os.getenv("LOG_LEVEL", "INFO")
     logging.basicConfig(
-        level=getattr(logging, log_level),
-        format="%(asctime)s - %(name)s - %(levelname)s - %(message)s",
+        level=logging.INFO,
+        format="%(asctime)s - %(levelname)s - %(message)s",
     )
-    return logging.getLogger("Invoice_optimized")
+    return logging.getLogger("Invoice_API")
 
 logger = setup_logging()
 
 API_KEY = os.getenv("GEMINI_API_KEY")
 if not API_KEY:
-    logger.warning("GEMINI_API_KEY not found in environment variables.")
+    logger.warning("⚠️ GEMINI_API_KEY not found in environment variables.")
 else:
     genai.configure(api_key=API_KEY)
 
 CONFIG = {
-    # === MODEL CONFIGURATION ===
-    # ONLY use these models - they have favorable rate limits
-    # gemini-2.5-flash: 1000 RPM (classification) 
-    # gemini-2.5-pro: 150 RPM (extraction)
-    "CLASSIFIER_MODEL": "gemini-2.5-flash",    # Fast classification
-    "EXTRACTOR_MODEL": "gemini-2.5-pro",       # Accurate extraction
-    
-    # === TIMEOUT CONFIGURATION ===
+    "CLASSIFIER_MODEL": "gemini-2.5-flash",
+    "EXTRACTOR_MODEL": "gemini-2.5-pro",
     "CLASSIFICATION_TIMEOUT": 120,           
     "BASE_TIMEOUT_SECONDS": 180,             
     "TIMEOUT_PER_PAGE": 30,                  
     "MAX_TIMEOUT_SECONDS": 1200,             
-    
-    # === RATE LIMIT SAFE PARALLEL CONFIGURATION ===
-    # With gemini-2.5-pro at 150 RPM (effective 105 with 70% margin):
-    # - Max 1.75 requests/second
-    # - Minimum 571ms between requests
-    # For 40+ splits: keeps us well under limits
-    "MAX_CONCURRENT_EXTRACTIONS": 2,         # Only 2 concurrent to avoid bursts
-    "BATCH_SIZE": 2,                         # Process 2 at a time
-    "INTER_BATCH_DELAY_SECONDS": 3.0,        # Reduced from 5s (rate limiter handles pacing)
-    "MIN_DELAY_BETWEEN_CALLS": 1.0,          # Backup delay (rate limiter is primary)
-    
-    # === ROBUST RETRY CONFIGURATION ===
-    "MAX_RETRIES": 5,                        
-    "INITIAL_RETRY_DELAY": 10.0,             
-    "MAX_RETRY_DELAY": 60.0,                 
-    "RETRY_MULTIPLIER": 2.0,                 
+    "MAX_CONCURRENT_EXTRACTIONS": 2,         
+    "BATCH_SIZE": 2,                         
+    "INTER_BATCH_DELAY_SECONDS": 1.0,        
+    "MAX_RETRIES": 3,                        
+    "INITIAL_RETRY_DELAY": 5.0,
+    "MAX_RETRY_DELAY": 60.0,
+    "RETRY_MULTIPLIER": 2.0,
 }
 
 PRICING = {
@@ -148,11 +135,14 @@ def split_pdf_sync(original_pdf_path: str, ranges: List[List[int]], output_dir: 
     
     for i, (start, end) in enumerate(ranges):
         writer = PdfWriter()
-        if start < 1: start = 1
-        if end > len(reader.pages): end = len(reader.pages)
-        for page_num in range(start - 1, end):
+        # Handle 1-based to 0-based conversion logic safely
+        s = max(1, start)
+        e = min(len(reader.pages), end)
+        
+        for page_num in range(s - 1, e):
             writer.add_page(reader.pages[page_num])
-        output_filename = f"{prefix}_{i+1}_{start}-{end}.pdf"
+        
+        output_filename = f"{prefix}_{i+1}_{s}-{e}.pdf"
         output_path = os.path.join(output_dir, output_filename)
         with open(output_path, "wb") as f:
             writer.write(f)
@@ -189,7 +179,7 @@ async def execute_with_exponential_backoff(
     for attempt in range(max_retries + 1):
         try:
             if attempt > 0:
-                await asyncio.sleep(CONFIG["MIN_DELAY_BETWEEN_CALLS"])
+                await asyncio.sleep(CONFIG["MIN_DELAY_BETWEEN_CALLS"] if "MIN_DELAY_BETWEEN_CALLS" in CONFIG else 0.5)
             return await async_func()
         except Exception as e:
             if attempt >= max_retries:
@@ -207,7 +197,7 @@ async def execute_with_exponential_backoff(
                 raise e
 
 # ==========================================
-# 3. PYDANTIC SCHEMAS
+# 3. PYDANTIC SCHEMAS (Preserved Completely)
 # ==========================================
 
 # --- INVOICE MODELS ---
@@ -227,7 +217,6 @@ class InvoiceItem(BaseModel):
     line_amount: float = Field(..., description="Line Amount")
     item_po_no: Optional[str] = Field(None, description="Customer Purchase Order Number")
     part_no: Optional[str] = Field(None, description="Part Number")
-    # Added HSN Code for India
     hsn_code: Optional[str] = Field(None, description="HSN/SAC Code")
 
 class Invoice(BaseModel):
@@ -242,8 +231,7 @@ class Invoice(BaseModel):
     # --- India GST Fields ---
     vendor_gstin: Optional[str] = Field(None, description="Vendor GST Number")
     billing_gstin: Optional[str] = Field(None, description="Billing/Customer GST Number")
-    # ------------------------
-
+    
     vendor_vat_no: Optional[str] = Field(None, description="Vendor VAT Number")
     billing_vat_no: Optional[str] = Field(None, description="Billing VAT Number")
     date: str = Field(..., description="Document Date (YYYY-MM-DD)")
@@ -261,7 +249,6 @@ class Invoice(BaseModel):
     sgst_total: Optional[float] = Field(None, description="Total SGST Amount")
     cgst_total: Optional[float] = Field(None, description="Total CGST Amount")
     igst_total: Optional[float] = Field(None, description="Total IGST Amount")
-    # -------------------
 
     net_amount: Optional[float] = Field(None, description="Net Amount")
     discount: Optional[float] = Field(None, description="Discount Amount")
@@ -361,41 +348,31 @@ class GoodsReceivedNote(BaseModel):
     total_packages: Optional[int] = None
     items: List[GRNItem] = Field(default_factory=list)
 
+# --- RESPONSE MODELS ---
 
 class DocumentClassification(BaseModel):
     """
     Classification result showing page ranges for each document type.
-    Universal categories only.
     """
     invoices: List[List[int]] = Field(default_factory=list, description="Commercial Invoices")
     po: List[List[int]] = Field(default_factory=list, description="Purchase Orders")
     grn: List[List[int]] = Field(default_factory=list, description="Goods Received Notes")
 
-
 class ExtractionResult(BaseModel):
     document_type: str 
     page_range: List[int]
-    data: Optional[dict] = None
+    data: Optional[Dict[str, Any]] = None
     error: Optional[str] = None
-    token_usage: Optional[dict] = None
-    cost_usd: Optional[float] = 0.0
-    extraction_time_seconds: Optional[float] = None
+    token_usage: Optional[Dict[str, Any]] = None
+    cost_usd: float = 0.0
+    extraction_time_seconds: float = 0.0
 
-class JobStatusResponse(BaseModel):
-    job_id: str
+class FullApiResponse(BaseModel):
     status: str
-    created_at: datetime
-    completed_at: Optional[datetime] = None
-    processing_time_seconds: Optional[float] = None
-    file_name: Optional[str] = None
-    model_used: Optional[str] = None
-    classification: Optional[DocumentClassification] = None
-    results: Optional[List[ExtractionResult]] = None
-    total_tokens: Optional[int] = 0
-    total_cost_usd: Optional[float] = 0.0
-    error: Optional[str] = None
-    classification_time_seconds: Optional[float] = None
-    extraction_parallelism: Optional[int] = None
+    processing_time_seconds: float
+    total_cost_usd: float
+    classification: DocumentClassification
+    results: List[ExtractionResult]
 
 # ==========================================
 # 4. AI CONFIG HELPERS
@@ -448,7 +425,6 @@ def get_generation_config(response_schema=None):
 # 5. SERVICE FUNCTIONS
 # ==========================================
 
-# Pre-create model instances (reusable)
 _classifier_model = None
 _extractor_model = None
 
@@ -464,33 +440,29 @@ def get_extractor_model():
         _extractor_model = genai.GenerativeModel(CONFIG["EXTRACTOR_MODEL"])
     return _extractor_model
 
-async def classify_documents_optimized(pdf_path: str) -> Tuple[DocumentClassification, float]:
-    """Optimized classification with timing."""
-    start_time = time.time()
-    
+async def classify_document(pdf_path: str) -> Tuple[DocumentClassification, float]:
+    start = time.time()
     try:
         with open(pdf_path, "rb") as f:
             total_pages = get_pdf_page_count(f.read())
-    except: 
+    except:
         total_pages = 1000
 
     pdf_file = genai.upload_file(pdf_path, mime_type="application/pdf")
     model = get_classifier_model()
-    
     config = get_generation_config(response_schema=DocumentClassification)
     
     try:
-        # Rate limit before classification
         await get_rate_limiter().acquire(CONFIG["CLASSIFIER_MODEL"])
-
+        
         response = await model.generate_content_async(
             [CLASSIFICATION_PROMPT, pdf_file],
             generation_config=config,
             request_options={"timeout": CONFIG["CLASSIFICATION_TIMEOUT"]}
         )
-        raw_class = DocumentClassification.model_validate_json(response.text)
+        result = DocumentClassification.model_validate_json(response.text)
         
-        # Sanitize output
+        # Sanitize
         def clean_ranges(ranges_list):
             cleaned = []
             for r in ranges_list:
@@ -498,350 +470,128 @@ async def classify_documents_optimized(pdf_path: str) -> Tuple[DocumentClassific
                 if valid_pages: cleaned.append([min(valid_pages), max(valid_pages)])
             return cleaned
 
-        raw_class.invoices = clean_ranges(raw_class.invoices)
-        raw_class.po = clean_ranges(raw_class.po)
-        raw_class.grn = clean_ranges(raw_class.grn)
+        result.invoices = clean_ranges(result.invoices)
+        result.po = clean_ranges(result.po)
+        result.grn = clean_ranges(result.grn)
         
-        elapsed = time.time() - start_time
-        return raw_class, elapsed
+        return result, time.time() - start
         
     except Exception as e:
         logger.error(f"Classification failed: {e}")
-        elapsed = time.time() - start_time
-        # Default fallback if classification completely fails
-        return DocumentClassification(invoices=[[1, total_pages]]), elapsed
+        # Return fallback classification (Assume whole doc is invoice)
+        return DocumentClassification(invoices=[[1, total_pages]]), time.time() - start
 
-
-async def extract_single_document(
+async def extract_document_chunk(
     pdf_path: str, 
     doc_type: str, 
     page_range: List[int],
     doc_index: int
 ) -> ExtractionResult:
-    """
-    Extract a single document using the correct prompt based on doc_type.
-    """
     start_time = time.time()
-    num_pages = page_range[1] - page_range[0] + 1 if len(page_range) == 2 else 1
-    dynamic_timeout = calculate_timeout_for_pages(num_pages)
     
-    # 1. SELECT PROMPT & SCHEMA
+    # 1. Select Prompt & Schema
     if doc_type == "po":
         prompt = PO_PROMPT
         schema = PurchaseOrder
-        log_type = "Purchase Order"
     elif doc_type == "grn":
         prompt = GRN_PROMPT
         schema = GoodsReceivedNote
-        log_type = "Goods Received Note"
     else:
-        # Default to Invoice
         prompt = INVOICE_PROMPT
         schema = Invoice
-        log_type = "Commercial Invoice"
+
+    num_pages = page_range[1] - page_range[0] + 1
+    timeout = calculate_timeout_for_pages(num_pages)
     
-    logger.info(f"Doc {doc_index}: Starting {log_type} (pages {page_range[0]}-{page_range[1]}, {num_pages} pages, timeout={dynamic_timeout}s)")
-    
-    async with get_api_semaphore():  # Concurrency control via semaphore
+    logger.info(f"Extracting {doc_type} (pages {page_range[0]}-{page_range[1]})")
+
+    async with get_api_semaphore():
         try:
-            # --- PARALLEL EXECUTION: MAIN EXTRACTION + HEADER OCR ---
+            await get_rate_limiter().acquire(CONFIG["EXTRACTOR_MODEL"])
             
-            # TASK A: Main Table Extraction (Gemini Pro)
-            async def run_main_extraction():
-                # Rate limit before extraction (sliding window + burst protection)
-                await get_rate_limiter().acquire(CONFIG["EXTRACTOR_MODEL"])
-                
+            async def run_extraction():
                 pdf_file = genai.upload_file(pdf_path, mime_type="application/pdf")
                 model = get_extractor_model()
-                
                 config = get_generation_config(response_schema=schema)
-                
-                response = await model.generate_content_async(
+                return await model.generate_content_async(
                     [prompt, pdf_file],
                     generation_config=config,
-                    request_options={"timeout": dynamic_timeout}
+                    request_options={"timeout": timeout}
                 )
-                return response
-            
-            # TASK B: Header OCR Flow (Gemini Flash x2)
-            # Only run for Invoices, not POs or GRNs
-            async def run_header_extraction():
-                if schema == Invoice:
-                    # Assuming refined_extractor module exists and is compatible
-                    try:
-                        from services.refined_extractor import run_header_ocr_flow
-                        return await run_header_ocr_flow(pdf_path)
-                    except ImportError:
-                        logger.warning("Refined extractor module not found, skipping header flow.")
-                        return {}
-                return {}
 
-            # Execute Parallel
-            main_response_data, header_data = await asyncio.gather(
-                execute_with_exponential_backoff(run_main_extraction, operation_name=f"Extract doc {doc_index}"),
-                run_header_extraction(),
-                return_exceptions=False
-            )
+            # Use retry logic
+            response = await execute_with_exponential_backoff(run_extraction, operation_name=f"Extract doc {doc_index}")
             
-            # Usage Tracking (Main Model)
+            # Metadata
             usage = None
-            if main_response_data.usage_metadata:
+            if response.usage_metadata:
                 usage = {
-                    "prompt_token_count": main_response_data.usage_metadata.prompt_token_count,
-                    "candidates_token_count": main_response_data.usage_metadata.candidates_token_count,
-                    "total_token_count": main_response_data.usage_metadata.total_token_count
+                    "prompt_token_count": response.usage_metadata.prompt_token_count,
+                    "candidates_token_count": response.usage_metadata.candidates_token_count,
+                    "total_token_count": response.usage_metadata.total_token_count
                 }
             
-            # Parse Main Data
-            pydantic_obj = schema.model_validate_json(main_response_data.text)
-            extracted_data = pydantic_obj.dict()
+            # Validate & Parse
+            data_obj = schema.model_validate_json(response.text)
+            data_dict = data_obj.dict()
             
-            # --- MERGE & BROADCAST LOGIC (Invoices Only) ---
-            # NOTE: Logic updated/removed because the new Invoice schema 
-            # does not support the old fields (invoice_toi, item_mfg_name, etc.)
-            if schema == Invoice and header_data:
-                # We can try to map what exists, but most fields are different now.
-                # For now, we skip the old legacy merge to avoid errors.
-                pass
-
-            # --- POST PROCESSING ---
-            if schema == Invoice:
-                extracted_data = post_process_invoice(extracted_data)
-            # Add post-processing for PO/GRN if needed here
+            # Post Process (simple cleanup)
+            data_dict = post_process_data(data_dict)
             
-            elapsed = time.time() - start_time
-            cost = calculate_cost(
-                CONFIG["EXTRACTOR_MODEL"], 
-                usage.get("prompt_token_count", 0) if usage else 0, 
-                usage.get("candidates_token_count", 0) if usage else 0
-            )
-            
-            logger.info(f"Doc {doc_index} ({doc_type}) extracted in {elapsed:.2f}s")
+            cost = calculate_cost(CONFIG["EXTRACTOR_MODEL"], usage["prompt_token_count"] if usage else 0, usage["candidates_token_count"] if usage else 0)
             
             return ExtractionResult(
                 document_type=doc_type,
                 page_range=page_range,
-                data=extracted_data,
+                data=data_dict,
                 token_usage=usage,
                 cost_usd=cost,
-                extraction_time_seconds=round(elapsed, 2)
+                extraction_time_seconds=time.time() - start_time
             )
             
         except Exception as e:
-            elapsed = time.time() - start_time
-            logger.error(f"Extraction failed for doc {doc_index} after all retries: {e}")
+            logger.error(f"Extraction failed: {e}")
             return ExtractionResult(
                 document_type=doc_type,
                 page_range=page_range,
                 error=str(e),
-                extraction_time_seconds=round(elapsed, 2)
+                extraction_time_seconds=time.time() - start_time
             )
         finally:
-            # CRITICAL: Release rate limiter slot when extraction completes
             release_rate_limit(CONFIG["EXTRACTOR_MODEL"])
 
-
-def post_process_invoice(data: Dict[str, Any]) -> Dict[str, Any]:
-    INVALID_LITERALS = {"", "null", "string", "number", "integer", "float", "boolean", "None"}
+def post_process_data(data: Dict[str, Any]) -> Dict[str, Any]:
+    """Basic cleanup logic shared across docs."""
+    INVALID_LITERALS = {"", "null", "string", "number", "None"}
     
     def clean_value(value):
         if value is None: return None
         if isinstance(value, str) and value.strip() in INVALID_LITERALS: return None
         return value
-    
-    if "items" in data and isinstance(data["items"], list):
-        for idx, item in enumerate(data["items"], 1):
-            
-            # 2. Extract Fields (mapped to new schema)
-            desc = (item.get("description") or "").strip()
-            part = (item.get("part_no") or "").strip()
 
-            # 3. Description Cleaning (Remove Part Number if present at end)
-            if desc and part and desc.endswith(part):
-                clean_desc = desc[:-len(part)].strip()
-                if clean_desc:
-                    item["description"] = clean_desc
+    if "items" in data and isinstance(data["items"], list):
+        for item in data["items"]:
+            # Special Invoice logic: Clean description
+            if "description" in item and "part_no" in item:
+                desc = (item.get("description") or "").strip()
+                part = (item.get("part_no") or "").strip()
+                if desc and part and desc.endswith(part):
+                    clean_desc = desc[:-len(part)].strip()
+                    if clean_desc: item["description"] = clean_desc
             
-            # Clean all values
-            for key in list(item.keys()): 
-                item[key] = clean_value(item[key])
-    
-    for key in list(data.keys()):
-        if key != "items": data[key] = clean_value(data[key])
+            for k in list(item.keys()):
+                item[k] = clean_value(item[k])
+
+    for k in list(data.keys()):
+        if k != "items":
+            data[k] = clean_value(data[k])
+            
     return data
 
-
 # ==========================================
-# 6. OPTIMIZED PIPELINE (PARALLEL + DASHBOARD)
+# 6. API DEFINITION
 # ==========================================
-async def run_pipeline_optimized(job_id: str, file_path: str, model_name: str):
-    """
-    Optimized pipeline with PARALLEL extraction and Terminal Dashboard.
-    """
-    try:
-        JOBS[job_id]["status"] = "classifying"
-        pipeline_start = time.time()
-        
-        # Step 1: Classification
-        logger.info(f"Job {job_id}: Classifying...")
-        classification, class_time = await classify_documents_optimized(file_path)
-        JOBS[job_id]["classification"] = classification.dict()
-        JOBS[job_id]["classification_time_seconds"] = round(class_time, 2)
-        
-        # ===== DASHBOARD: CLASSIFICATION =====
-        def count_pages(ranges): return sum((r[1] - r[0] + 1) for r in ranges) if ranges else 0
-        
-        print("\n" + "="*60)
-        print(f"📋 CLASSIFICATION RESULT (Job: {job_id[:8]}...)")
-        print("="*60)
-        print(f"⏱️  Classification time: {class_time:.2f}s")
-        print(f"\n📦 INVOICES: {len(classification.invoices)} docs ({count_pages(classification.invoices)} pages)")
-        print(f"📝 POs:      {len(classification.po)} docs ({count_pages(classification.po)} pages)")
-        print(f"🚚 GRNs:     {len(classification.grn)} docs ({count_pages(classification.grn)} pages)")
-        print("="*60 + "\n")
-        
-        # Step 2: Split PDF & Build Tasks
-        JOBS[job_id]["status"] = "splitting"
-        split_tasks = []
-        
-        for r in classification.invoices: split_tasks.append({"type": "invoice", "range": r})
-        for r in classification.po:       split_tasks.append({"type": "po", "range": r})
-        for r in classification.grn:      split_tasks.append({"type": "grn", "range": r})
-        
-        ranges = [t["range"] for t in split_tasks]
-        if not ranges:
-            split_tasks = [{"type": "invoice", "range": [1, 1]}]
-            split_paths = [file_path]
-        else:
-            split_paths = await split_pdf_async(
-                file_path, ranges, 
-                os.path.join(SPLIT_DIR, job_id), job_id
-            )
-        
-        # Step 3: PARALLEL EXTRACTION
-        JOBS[job_id]["status"] = "extracting"
-        JOBS[job_id]["extraction_parallelism"] = min(len(split_paths), CONFIG["MAX_CONCURRENT_EXTRACTIONS"])
-        
-        extraction_start = time.time()
-        batch_size = CONFIG["BATCH_SIZE"]
-        inter_batch_delay = CONFIG["INTER_BATCH_DELAY_SECONDS"]
-        
-        extraction_tasks = [
-            {
-                "pdf_path": split_paths[i],
-                "doc_type": split_tasks[i]["type"],
-                "page_range": split_tasks[i]["range"],
-                "doc_index": i + 1
-            }
-            for i in range(len(split_paths))
-            if i < len(split_tasks)
-        ]
-        
-        all_results = []
-        num_batches = (len(extraction_tasks) + batch_size - 1) // batch_size
-        
-        logger.info(f"Job {job_id}: Processing {len(extraction_tasks)} documents in {num_batches} batches (Parallelism={CONFIG['MAX_CONCURRENT_EXTRACTIONS']})")
-        
-        for batch_idx in range(num_batches):
-            batch_start = batch_idx * batch_size
-            batch_end = min(batch_start + batch_size, len(extraction_tasks))
-            batch = extraction_tasks[batch_start:batch_end]
-            
-            logger.info(f"Job {job_id}: Starting batch {batch_idx + 1}/{num_batches} ({len(batch)} docs)")
-            
-            # [FIXED] PARALLEL EXECUTION
-            # 1. Create list of coroutine objects (tasks) but do not await them yet
-            tasks = [
-                extract_single_document(
-                    pdf_path=task["pdf_path"],
-                    doc_type=task["doc_type"],
-                    page_range=task["page_range"],
-                    doc_index=task["doc_index"]
-                )
-                for task in batch
-            ]
-            
-            # 2. Fire all tasks in this batch AT THE SAME TIME using gather
-            # return_exceptions=True prevents one failure from crashing the batch
-            batch_results = await asyncio.gather(*tasks, return_exceptions=True)
-            
-            # Collect results
-            for res in batch_results:
-                if isinstance(res, Exception):
-                    logger.error(f"Batch task failed: {res}")
-                    all_results.append(res)
-                else:
-                    all_results.append(res)
-            
-            if batch_idx < num_batches - 1:
-                logger.debug(f"Job {job_id}: Waiting {inter_batch_delay}s before next batch...")
-                await asyncio.sleep(inter_batch_delay)
-        
-        extraction_time = time.time() - extraction_start
-        logger.info(f"Job {job_id}: All {len(all_results)} extractions completed in {extraction_time:.2f}s")
-        
-        # Process results
-        final_results = []
-        total_tokens = 0
-        total_cost = 0.0
-        
-        for result in all_results:
-            if isinstance(result, Exception):
-                logger.error(f"Extraction exception: {result}")
-                continue
-            if isinstance(result, ExtractionResult):
-                final_results.append(result)
-                if result.token_usage:
-                    total_tokens += result.token_usage.get("total_token_count", 0)
-                total_cost += result.cost_usd or 0.0
-        
-        # Finalize
-        JOBS[job_id]["results"] = [r.dict() for r in final_results]
-        JOBS[job_id]["total_tokens"] = total_tokens
-        JOBS[job_id]["total_cost_usd"] = round(total_cost, 6)
-        JOBS[job_id]["status"] = "completed"
-        JOBS[job_id]["completed_at"] = datetime.now()
-        JOBS[job_id]["processing_time_seconds"] = round(time.time() - pipeline_start, 2)
-        
-        # ===== DASHBOARD: COMPLETION =====
-        success_count = sum(1 for r in final_results if r.error is None)
-        fail_count = sum(1 for r in final_results if r.error is not None)
-        
-        print("\n" + "="*60)
-        print(f"✅ JOB COMPLETED (Job: {job_id[:8]}...)")
-        print("="*60)
-        print(f"⏱️  Total time: {JOBS[job_id]['processing_time_seconds']}s")
-        print(f"📄 Documents extracted: {success_count}/{len(final_results)}")
-        if fail_count > 0:
-            print(f"❌ Failed: {fail_count}")
-            for r in final_results:
-                if r.error:
-                    print(f"   - {r.document_type} (pages {r.page_range}): {r.error[:50]}...")
-        print(f"💰 Total cost: ${total_cost:.4f}")
-        print(f"🔢 Total tokens: {total_tokens}")
-        
-        # Rate limiter stats
-        try:
-            stats = get_rate_limit_stats()
-            print("\n🛡️ Rate Limiter Stats:")
-            for model, st in stats.items():
-                print(f"   {model}: {st['current_window']}/{st['limit_rpm']} RPM, waited {st['total_wait_seconds']}s total")
-        except:
-            pass
-        
-        print("="*60 + "\n")
-        
-        logger.info(f"Job {job_id}: COMPLETED in {JOBS[job_id]['processing_time_seconds']}s")
-        
-    except Exception as e:
-        logger.error(f"Job {job_id} Failed: {e}")
-        JOBS[job_id]["status"] = "failed"
-        JOBS[job_id]["error"] = str(e)
-
-# ==========================================
-# 7. FASTAPI APPLICATION
-# ==========================================
-app = FastAPI(title="Invoice Extraction API (Universal Routing + Parallel)", version="3.3.0")
+app = FastAPI(title="Invoice Extraction API (Synchronous)", version="4.0")
 
 app.add_middleware(
     CORSMiddleware,
@@ -851,162 +601,103 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-
 @app.on_event("startup")
 async def startup_event():
-    """
-    Initialize bulletproof rate limiter on application startup.
-    
-    Rate Limits (from Google AI Studio dashboard):
-    - gemini-2.5-flash: 1000 RPM, 1M TPM, 10K RPD
-    - gemini-2.5-pro: 150 RPM, 2M TPM, 10K RPD
-    
-    With 70% safety margin:
-    - Flash: 700 effective RPM
-    - Pro: 105 effective RPM (~1.75 req/sec)
-    """
+    # Initialize rate limiter
     initialize_rate_limiter(
         model_limits={
-            "gemini-2.5-flash": 1000,  # Classification model
-            "gemini-2.5-pro": 150,     # Extraction model - THIS IS THE BOTTLENECK
+            "gemini-2.5-flash": 1000, 
+            "gemini-2.5-pro": 150
         },
-        safety_margin=0.7,             # 70% of limit (more conservative)
-        min_request_gap_ms=500,        # Minimum 500ms between requests to same model
-        max_concurrent_per_model=2     # Max 2 concurrent requests per model
+        safety_margin=0.7,
+        min_request_gap_ms=500,
+        max_concurrent_per_model=2
     )
-    logger.info("✅ Bulletproof rate limiter initialized for 40+ split handling")
 
-JOBS = {}
+JOBS = {} # Removed logic, but keeping variable if needed for extension
 UPLOAD_DIR = "uploads"
 SPLIT_DIR = "splits"
 os.makedirs(UPLOAD_DIR, exist_ok=True)
 os.makedirs(SPLIT_DIR, exist_ok=True)
 
-@app.post("/api/v1/process-document", response_model=JobStatusResponse)
-async def process_document(file: UploadFile = File(...)):
-    if file.content_type != "application/pdf":
-        raise HTTPException(status_code=400, detail="Only PDF allowed.")
-
-    job_id = str(uuid.uuid4())
-    file_path = os.path.join(UPLOAD_DIR, f"{job_id}.pdf")
+@app.post("/api/v1/extract", response_model=FullApiResponse)
+async def extract_document_sync(file: UploadFile = File(...)):
+    """
+    Synchronous Endpoint:
+    1. Uploads PDF
+    2. Classifies Doc
+    3. Splits PDF
+    4. Extracts Data
+    5. Returns JSON
+    """
+    request_id = str(uuid.uuid4())
+    file_path = os.path.join(UPLOAD_DIR, f"{request_id}.pdf")
+    split_dir_path = os.path.join(SPLIT_DIR, request_id)
+    
+    start_total = time.time()
     
     try:
-        content = await file.read()
-        async with aiofiles.open(file_path, "wb") as f:
-            await f.write(content)
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=f"Upload failed: {e}")
-    
-    JOBS[job_id] = {
-        "job_id": job_id,
-        "status": "queued",
-        "created_at": datetime.now(),
-        "file_name": file.filename,
-        "model_used": CONFIG["EXTRACTOR_MODEL"]
-    }
-    
-    await run_pipeline_optimized(job_id, file_path, CONFIG["EXTRACTOR_MODEL"])
-    
-    return JobStatusResponse(**JOBS[job_id])
-
-# ==========================================
-# NEW ENDPOINTS FOR BREAKDOWN TASKS
-# ==========================================
-
-@app.post("/api/v1/classify-document", response_model=DocumentClassification)
-async def api_classify_document(file: UploadFile = File(...)):
-    """
-    Standalone endpoint to just CLASSIFY the document without extraction.
-    Returns page ranges for Invoices, POs, and GRNs.
-    """
-    if file.content_type != "application/pdf":
-        raise HTTPException(status_code=400, detail="Only PDF allowed.")
-
-    temp_id = str(uuid.uuid4())
-    file_path = os.path.join(UPLOAD_DIR, f"temp_classify_{temp_id}.pdf")
-    
-    try:
+        # 1. Save uploaded file
         content = await file.read()
         async with aiofiles.open(file_path, "wb") as f:
             await f.write(content)
             
-        classification, _ = await classify_documents_optimized(file_path)
-        return classification
+        # 2. Classify
+        classification, _ = await classify_document(file_path)
+        
+        # 3. Prepare Split Tasks
+        split_tasks = []
+        for r in classification.invoices: split_tasks.append({"type": "invoice", "range": r})
+        for r in classification.po:       split_tasks.append({"type": "po", "range": r})
+        for r in classification.grn:      split_tasks.append({"type": "grn", "range": r})
+        
+        ranges = [t["range"] for t in split_tasks]
+        
+        # If no classification found, default to invoice
+        if not ranges:
+            page_count = get_pdf_page_count(content)
+            split_tasks = [{"type": "invoice", "range": [1, page_count]}]
+            split_paths = [file_path] # No split needed
+            # Update classification object for response
+            classification.invoices = [[1, page_count]]
+        else:
+            split_paths = await split_pdf_async(
+                file_path, ranges, 
+                split_dir_path, request_id
+            )
+        
+        # 4. Extract (Parallel)
+        extraction_tasks = []
+        for i, path in enumerate(split_paths):
+            if i < len(split_tasks):
+                meta = split_tasks[i]
+                extraction_tasks.append(
+                    extract_document_chunk(path, meta["type"], meta["range"], i+1)
+                )
+        
+        results = await asyncio.gather(*extraction_tasks)
+        
+        # 5. Aggregate
+        total_cost = sum(r.cost_usd for r in results)
+        
+        return FullApiResponse(
+            status="success",
+            processing_time_seconds=time.time() - start_total,
+            total_cost_usd=round(total_cost, 6),
+            classification=classification,
+            results=results
+        )
         
     except Exception as e:
-        logger.error(f"Classify API failed: {e}")
+        logger.error(f"Global pipeline failed: {e}")
         raise HTTPException(status_code=500, detail=str(e))
+        
     finally:
         # Cleanup
         if os.path.exists(file_path):
             os.remove(file_path)
-
-@app.post("/api/v1/extract-document", response_model=ExtractionResult)
-async def api_extract_document(
-    file: UploadFile = File(...),
-    doc_type: str = Form(..., description="Type of document: 'invoice', 'po', or 'grn'", regex="^(invoice|po|grn)$"),
-    start_page: int = Form(..., description="Start page number (1-based)"),
-    end_page: int = Form(..., description="End page number (1-based)")
-):
-    """
-    Standalone endpoint to EXTRACT text from a specific page range of a document.
-    """
-    if file.content_type != "application/pdf":
-        raise HTTPException(status_code=400, detail="Only PDF allowed.")
-    
-    if start_page < 1 or end_page < start_page:
-        raise HTTPException(status_code=400, detail="Invalid page range.")
-
-    temp_id = str(uuid.uuid4())
-    original_path = os.path.join(UPLOAD_DIR, f"temp_extract_orig_{temp_id}.pdf")
-    
-    # We must split the specific pages to a new file because extract_single_document 
-    # sends the whole file at pdf_path to the AI.
-    split_dir = os.path.join(SPLIT_DIR, f"temp_extract_{temp_id}")
-    split_path = None
-
-    try:
-        # 1. Save Original
-        content = await file.read()
-        async with aiofiles.open(original_path, "wb") as f:
-            await f.write(content)
-            
-        # 2. Split PDF to get only the relevant pages (saves tokens/cost)
-        # split_pdf_async returns a list of paths, we expect 1 here
-        split_paths = await split_pdf_async(
-            original_path, 
-            [[start_page, end_page]], 
-            split_dir, 
-            f"extract_{temp_id}"
-        )
-        
-        if not split_paths:
-            raise HTTPException(status_code=500, detail="Failed to slice PDF.")
-            
-        split_path = split_paths[0]
-        
-        # 3. Extract
-        result = await extract_single_document(
-            pdf_path=split_path,
-            doc_type=doc_type,
-            page_range=[start_page, end_page],
-            doc_index=1
-        )
-        
-        return result
-
-    except Exception as e:
-        logger.error(f"Extract API failed: {e}")
-        raise HTTPException(status_code=500, detail=str(e))
-    finally:
-        # Cleanup
-        if os.path.exists(original_path):
-            os.remove(original_path)
-        if split_path and os.path.exists(split_path):
-            os.remove(split_path)
-        if os.path.exists(split_dir):
-            import shutil
-            shutil.rmtree(split_dir, ignore_errors=True)
+        if os.path.exists(split_dir_path):
+            shutil.rmtree(split_dir_path, ignore_errors=True)
 
 if __name__ == "__main__":
-    uvicorn.run(app, host="0.0.0.0", port=5612, timeout_keep_alive=300)
+    uvicorn.run(app, host="0.0.0.0", port=5612)
