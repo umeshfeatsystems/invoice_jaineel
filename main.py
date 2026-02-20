@@ -12,6 +12,7 @@ import logging
 import asyncio
 import aiofiles
 import shutil
+import re
 from typing import List, Optional, Dict, Any
 from datetime import datetime
 
@@ -59,6 +60,55 @@ PRICING = {
     "gemini-2.5-pro": {"input": 1.25, "output": 3.75},
     "default": {"input": 0.10, "output": 0.40}
 }
+
+INVOICE_EXTRA_GUARDRAILS = """
+### INVOICE HALLUCINATION GUARDRAILS (STRICT)
+- Use evidence only from the requested invoice page range. Never use values from other pages.
+- Populate OPTIONAL fields only when the value is explicitly present with a matching label/context.
+- If a value is missing, ambiguous, or unreadable, return null.
+- Output key mapping:
+  - seller_name -> name
+  - seller_address -> vendor_addr
+  - buyer_name -> billing_name
+  - buyer_address -> billing_addr
+  - invoice_number -> invoice_no
+  - invoice_date -> date
+  - invoice_currency -> currency
+  - total_amount -> total
+- Never repeat one token across unrelated fields (GST/VAT/email/bank/HSN/part/line fields).
+- Format checks:
+  - vendor_gstin/billing_gstin: 15 alphanumeric chars.
+  - vendor_email: must contain '@'.
+  - bank_details.swift_code: 8 or 11 alphanumeric chars.
+  - bank_details.iban: starts with 2 letters + 2 digits.
+  - items[*].hsn_code: 4-8 digits only.
+- Do not fabricate line items. If the line-item table is absent, return an empty list.
+"""
+
+INVALID_OPTIONAL_LITERALS = {
+    "",
+    "null",
+    "none",
+    "n/a",
+    "na",
+    "-",
+    "--",
+    "not available",
+    "not applicable",
+    "string",
+    "number",
+    "integer",
+    "float",
+    "boolean",
+}
+
+GSTIN_PATTERN = re.compile(r"^\d{2}[A-Z0-9]{13}$")
+EMAIL_PATTERN = re.compile(r"^[A-Z0-9._%+\-]+@[A-Z0-9.\-]+\.[A-Z]{2,}$", re.IGNORECASE)
+HSN_PATTERN = re.compile(r"^\d{4,8}$")
+IBAN_PATTERN = re.compile(r"^[A-Z]{2}\d{2}[A-Z0-9]{11,30}$")
+SWIFT_PATTERN = re.compile(r"^[A-Z]{6}[A-Z0-9]{2}(?:[A-Z0-9]{3})?$")
+ROUTING_PATTERN = re.compile(r"^\d{5,12}$")
+BANK_ACCOUNT_PATTERN = re.compile(r"^[A-Z0-9\-]{4,34}$", re.IGNORECASE)
 
 # ==========================================
 # SCHEMAS
@@ -116,6 +166,167 @@ def calculate_timeout_for_pages(num_pages: int) -> int:
     per_page = CONFIG["TIMEOUT_PER_PAGE"]
     max_timeout = CONFIG["MAX_TIMEOUT_SECONDS"]
     return min(base + (num_pages * per_page), max_timeout)
+
+def _clean_optional_text(value: Any) -> Optional[str]:
+    if value is None or not isinstance(value, str):
+        return None if value is None else value
+    text = value.strip()
+    if text.lower() in INVALID_OPTIONAL_LITERALS:
+        return None
+    return text or None
+
+def _normalize_token(value: str) -> str:
+    return re.sub(r"\s+", " ", value.strip()).lower()
+
+def _looks_like_repeated_placeholder(value: str) -> bool:
+    compact = re.sub(r"[\s\-_/.,:;]", "", value).upper()
+    if len(compact) < 6:
+        return False
+    has_alpha = any(ch.isalpha() for ch in compact)
+    has_digit = any(ch.isdigit() for ch in compact)
+    if not (has_alpha and has_digit):
+        return False
+    chunks = [c for c in value.split(" ") if c]
+    return len(chunks) >= 3 and all(len(chunk) <= 4 for chunk in chunks)
+
+def _collect_suspicious_invoice_tokens(data: Dict[str, Any]) -> set:
+    token_counts: Dict[str, int] = {}
+
+    def _add(value: Any):
+        cleaned = _clean_optional_text(value)
+        if not isinstance(cleaned, str):
+            return
+        token = _normalize_token(cleaned)
+        token_counts[token] = token_counts.get(token, 0) + 1
+
+    for key in [
+        "po_no",
+        "vendor_gstin",
+        "billing_gstin",
+        "vendor_vat_no",
+        "billing_vat_no",
+        "vendor_email",
+        "shipping_method",
+    ]:
+        _add(data.get(key))
+
+    bank = data.get("bank_details")
+    if isinstance(bank, dict):
+        for key in ["iban", "swift_code", "bank_routing_no", "bank_account_no"]:
+            _add(bank.get(key))
+
+    items = data.get("items")
+    if isinstance(items, list):
+        for item in items:
+            if not isinstance(item, dict):
+                continue
+            for key in ["line_no", "item_po_no", "part_no", "hsn_code"]:
+                _add(item.get(key))
+
+    return {
+        token
+        for token, count in token_counts.items()
+        if count >= 4 and _looks_like_repeated_placeholder(token)
+    }
+
+def _null_if_suspicious(value: Any, suspicious_tokens: set) -> Any:
+    if not isinstance(value, str):
+        return value
+    return None if _normalize_token(value) in suspicious_tokens else value
+
+def _sanitize_invoice_data(raw_data: Dict[str, Any]) -> Dict[str, Any]:
+    data = dict(raw_data)
+    suspicious_tokens = _collect_suspicious_invoice_tokens(data)
+
+    for key in [
+        "vendor_addr",
+        "billing_name",
+        "billing_addr",
+        "shipping_addr",
+        "due_date",
+        "shipping_date",
+        "payment_terms",
+        "payment_addr",
+        "vendor_vat_no",
+        "billing_vat_no",
+        "shipping_method",
+    ]:
+        data[key] = _null_if_suspicious(_clean_optional_text(data.get(key)), suspicious_tokens)
+
+    vendor_email = _null_if_suspicious(_clean_optional_text(data.get("vendor_email")), suspicious_tokens)
+    data["vendor_email"] = vendor_email if isinstance(vendor_email, str) and EMAIL_PATTERN.fullmatch(vendor_email) else None
+
+    for key in ["vendor_gstin", "billing_gstin"]:
+        gst_val = _null_if_suspicious(_clean_optional_text(data.get(key)), suspicious_tokens)
+        if isinstance(gst_val, str):
+            compact = re.sub(r"[\s\-]", "", gst_val).upper()
+            data[key] = compact if GSTIN_PATTERN.fullmatch(compact) else None
+        else:
+            data[key] = None
+
+    bank = data.get("bank_details")
+    if isinstance(bank, dict):
+        bank_data = dict(bank)
+        bank_data["bank_name"] = _clean_optional_text(bank_data.get("bank_name"))
+        bank_data["bank_addr"] = _clean_optional_text(bank_data.get("bank_addr"))
+
+        account_no = _null_if_suspicious(_clean_optional_text(bank_data.get("bank_account_no")), suspicious_tokens)
+        if isinstance(account_no, str):
+            compact = re.sub(r"\s+", "", account_no).upper()
+            bank_data["bank_account_no"] = account_no if BANK_ACCOUNT_PATTERN.fullmatch(compact) else None
+        else:
+            bank_data["bank_account_no"] = None
+
+        iban = _null_if_suspicious(_clean_optional_text(bank_data.get("iban")), suspicious_tokens)
+        if isinstance(iban, str):
+            compact = re.sub(r"\s+", "", iban).upper()
+            bank_data["iban"] = compact if IBAN_PATTERN.fullmatch(compact) else None
+        else:
+            bank_data["iban"] = None
+
+        swift = _null_if_suspicious(_clean_optional_text(bank_data.get("swift_code")), suspicious_tokens)
+        if isinstance(swift, str):
+            compact = re.sub(r"\s+", "", swift).upper()
+            bank_data["swift_code"] = compact if SWIFT_PATTERN.fullmatch(compact) else None
+        else:
+            bank_data["swift_code"] = None
+
+        routing = _null_if_suspicious(_clean_optional_text(bank_data.get("bank_routing_no")), suspicious_tokens)
+        if isinstance(routing, str):
+            compact = re.sub(r"\D", "", routing)
+            bank_data["bank_routing_no"] = compact if ROUTING_PATTERN.fullmatch(compact) else None
+        else:
+            bank_data["bank_routing_no"] = None
+
+        data["bank_details"] = bank_data if any(v is not None for v in bank_data.values()) else None
+    else:
+        data["bank_details"] = None
+
+    items = data.get("items")
+    if isinstance(items, list):
+        cleaned_items = []
+        for item in items:
+            if not isinstance(item, dict):
+                continue
+            item_data = dict(item)
+            for key in ["line_no", "item_po_no", "part_no", "hsn_code"]:
+                item_data[key] = _null_if_suspicious(_clean_optional_text(item_data.get(key)), suspicious_tokens)
+
+            line_no = item_data.get("line_no")
+            if isinstance(line_no, str):
+                trimmed = line_no.strip()
+                if " " in trimmed or len(trimmed) > 10:
+                    item_data["line_no"] = None
+
+            hsn_code = item_data.get("hsn_code")
+            if isinstance(hsn_code, str):
+                compact = re.sub(r"[.\s]", "", hsn_code)
+                item_data["hsn_code"] = compact if HSN_PATTERN.fullmatch(compact) else None
+
+            cleaned_items.append(item_data)
+        data["items"] = cleaned_items
+
+    return data
 
 def resolve_refs(schema, defs=None):
     if defs is None: 
@@ -297,7 +508,7 @@ async def extract_document_chunk(gemini_file, doc_type: str, page_range: List[in
         prompt = GRN_PROMPT
         schema = GoodsReceivedNote
     else:
-        prompt = INVOICE_PROMPT
+        prompt = INVOICE_PROMPT + "\n" + INVOICE_EXTRA_GUARDRAILS
         schema = Invoice
 
     num_pages = page_range[1] - page_range[0] + 1
@@ -327,6 +538,10 @@ async def extract_document_chunk(gemini_file, doc_type: str, page_range: List[in
             }
         
         data_obj = schema.model_validate_json(response.text)
+        data_payload = data_obj.model_dump()
+        if doc_type == "invoice":
+            data_payload = _sanitize_invoice_data(data_payload)
+            data_obj = Invoice.model_validate(data_payload)
         cost = calculate_cost(
             CONFIG["EXTRACTOR_MODEL"], 
             usage["prompt_token_count"] if usage else 0, 
@@ -336,7 +551,7 @@ async def extract_document_chunk(gemini_file, doc_type: str, page_range: List[in
         return ExtractionResult(
             document_type=doc_type,
             page_range=page_range,
-            data=data_obj.dict(),
+            data=data_obj.model_dump(),
             cost_usd=cost,
         )
     except Exception as e:
