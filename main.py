@@ -13,6 +13,7 @@ import asyncio
 import aiofiles
 import shutil
 import re
+import math
 from typing import List, Optional, Dict, Any
 from datetime import datetime
 
@@ -75,14 +76,56 @@ INVOICE_EXTRA_GUARDRAILS = """
   - invoice_date -> date
   - invoice_currency -> currency
   - total_amount -> total
+  - payment address / remit to -> payment_addr
+  - email / e-mail -> vendor_email
+  - vendor vat / vat no -> vendor_vat_no
+  - buyer vat / billing vat -> billing_vat_no
+  - ship to / shipping address -> shipping_addr
+  - ship via / shipping method -> shipping_method
+  - pan / pan no / permanent account number -> pan_no
+  - msme / udyam / udyam aadhaar -> msme_number
+- Optional field anchors:
+  - `pan_no`: PAN No, PAN Number, Permanent Account Number
+  - `msme_number`: MSME, UDYAM, Udyam Aadhaar
+  - `payment_addr`: Payment Address, Remit To, Pay To
+  - `vendor_email`: Email, E-mail
+  - `shipping_method`: Ship Via, Shipping Method, Mode of Transport
 - Never repeat one token across unrelated fields (GST/VAT/email/bank/HSN/part/line fields).
 - Format checks:
   - vendor_gstin/billing_gstin: 15 alphanumeric chars.
+  - pan_no: 10 chars (e.g. ABCDE1234F).
   - vendor_email: must contain '@'.
   - bank_details.swift_code: 8 or 11 alphanumeric chars.
   - bank_details.iban: starts with 2 letters + 2 digits.
   - items[*].hsn_code: 4-8 digits only.
 - Do not fabricate line items. If the line-item table is absent, return an empty list.
+"""
+
+GLOBAL_EXTRA_GUARDRAILS = """
+### UNIVERSAL ANTI-HALLUCINATION RULES (NON-NEGOTIABLE)
+- Extract only values explicitly visible on the requested page range.
+- Never infer, estimate, backfill, or copy values from nearby fields.
+- If label/context is missing or ambiguous, return null for that field.
+- Never reuse one value across multiple unrelated fields.
+- For numeric fields, return null if the value is not explicitly shown.
+"""
+
+PO_EXTRA_GUARDRAILS = """
+### PO HALLUCINATION GUARDRAILS
+- Populate optional fields only when explicitly present with matching labels.
+- Do not synthesize line-level values from totals or vice versa.
+- If any optional field is missing/unclear, return null.
+"""
+
+GRN_EXTRA_GUARDRAILS = """
+### GRN OPTIONAL FINANCIAL FIELDS
+- For each GRN line item, extract financial values if explicitly present:
+  - `unit_price` from labels: Unit Price, Rate, Price
+  - `amount` from labels: Amount, Line Amount, Total
+- Quantity labels such as `QTY RECEIVED`, `QTY ACCEPTED`, `REJECTED`, `QTY` are NEVER financial fields.
+- Never map quantity values into `unit_price` or `amount`.
+- Never derive `amount` from quantity when price/amount columns are absent.
+- If GRN has no financial columns, return null for these fields.
 """
 
 INVALID_OPTIONAL_LITERALS = {
@@ -109,6 +152,7 @@ IBAN_PATTERN = re.compile(r"^[A-Z]{2}\d{2}[A-Z0-9]{11,30}$")
 SWIFT_PATTERN = re.compile(r"^[A-Z]{6}[A-Z0-9]{2}(?:[A-Z0-9]{3})?$")
 ROUTING_PATTERN = re.compile(r"^\d{5,12}$")
 BANK_ACCOUNT_PATTERN = re.compile(r"^[A-Z0-9\-]{4,34}$", re.IGNORECASE)
+PAN_PATTERN = re.compile(r"^[A-Z]{5}[0-9]{4}[A-Z]$")
 
 # ==========================================
 # SCHEMAS
@@ -201,6 +245,8 @@ def _collect_suspicious_invoice_tokens(data: Dict[str, Any]) -> set:
 
     for key in [
         "po_no",
+        "pan_no",
+        "msme_number",
         "vendor_gstin",
         "billing_gstin",
         "vendor_vat_no",
@@ -234,6 +280,24 @@ def _null_if_suspicious(value: Any, suspicious_tokens: set) -> Any:
         return value
     return None if _normalize_token(value) in suspicious_tokens else value
 
+def _to_float_or_none(value: Any) -> Optional[float]:
+    if value is None:
+        return None
+    try:
+        val = float(value)
+    except (TypeError, ValueError):
+        return None
+    return val if math.isfinite(val) else None
+
+def _is_close(a: Optional[float], b: Optional[float], tol: float = 1e-6) -> bool:
+    return a is not None and b is not None and abs(float(a) - float(b)) <= tol
+
+def _is_zero(value: Optional[float], tol: float = 1e-9) -> bool:
+    return value is not None and abs(float(value)) <= tol
+
+def _is_integerish(value: Optional[float], tol: float = 1e-6) -> bool:
+    return value is not None and abs(float(value) - round(float(value))) <= tol
+
 def _sanitize_invoice_data(raw_data: Dict[str, Any]) -> Dict[str, Any]:
     data = dict(raw_data)
     suspicious_tokens = _collect_suspicious_invoice_tokens(data)
@@ -243,6 +307,8 @@ def _sanitize_invoice_data(raw_data: Dict[str, Any]) -> Dict[str, Any]:
         "billing_name",
         "billing_addr",
         "shipping_addr",
+        "pan_no",
+        "msme_number",
         "due_date",
         "shipping_date",
         "payment_terms",
@@ -263,6 +329,99 @@ def _sanitize_invoice_data(raw_data: Dict[str, Any]) -> Dict[str, Any]:
             data[key] = compact if GSTIN_PATTERN.fullmatch(compact) else None
         else:
             data[key] = None
+
+    pan_no = _null_if_suspicious(_clean_optional_text(data.get("pan_no")), suspicious_tokens)
+    if isinstance(pan_no, str):
+        compact = re.sub(r"\s+", "", pan_no).upper()
+        data["pan_no"] = compact if PAN_PATTERN.fullmatch(compact) else None
+    else:
+        data["pan_no"] = None
+
+    # Numeric sanitation for optional finance fields that tend to get placeholder hallucinations.
+    for key in [
+        "tax",
+        "tax_rate",
+        "sgst_percentage",
+        "cgst_percentage",
+        "igst_percentage",
+        "sgst_total",
+        "cgst_total",
+        "igst_total",
+        "net_amount",
+        "discount",
+        "shipping_charges",
+        "total",
+    ]:
+        data[key] = _to_float_or_none(data.get(key))
+
+    # If SGST/CGST are present, IGST should generally be absent on the same invoice.
+    sgst_present = bool((data.get("sgst_percentage") or 0) > 0 or (data.get("sgst_total") or 0) > 0)
+    cgst_present = bool((data.get("cgst_percentage") or 0) > 0 or (data.get("cgst_total") or 0) > 0)
+    if sgst_present and cgst_present:
+        data["igst_percentage"] = None
+        data["igst_total"] = None
+
+    # Detect repeated tiny placeholder values across unrelated optional numeric fields.
+    placeholder_fields = ["tax_rate", "igst_percentage", "igst_total", "discount", "shipping_charges"]
+    counts: Dict[float, int] = {}
+    for key in placeholder_fields:
+        value = data.get(key)
+        if value is None:
+            continue
+        rounded = round(float(value), 4)
+        counts[rounded] = counts.get(rounded, 0) + 1
+    repeated_placeholders = {
+        value for value, cnt in counts.items() if cnt >= 3 and 0 < value <= 5
+    }
+    if repeated_placeholders:
+        for key in placeholder_fields:
+            value = data.get(key)
+            if value is not None and round(float(value), 4) in repeated_placeholders:
+                data[key] = None
+
+    # Derive tax_rate when tax + net_amount are present and extracted rate is missing/invalid.
+    tax = data.get("tax")
+    net_amount = data.get("net_amount")
+    if tax is not None and net_amount is not None and net_amount > 0:
+        computed_rate = round((tax / net_amount) * 100, 2)
+        current_rate = data.get("tax_rate")
+        if current_rate is None or abs(current_rate - computed_rate) > 0.5:
+            data["tax_rate"] = computed_rate
+
+    # Tax consistency checks to suppress unsupported/hallucinated values.
+    tax = data.get("tax")
+    if tax is not None:
+        if tax < 0:
+            data["tax"] = None
+            data["tax_rate"] = None
+        else:
+            total = data.get("total")
+            if total is not None and tax > (total * 0.6):
+                data["tax"] = None
+                data["tax_rate"] = None
+
+    tax = data.get("tax")
+    if tax is not None:
+        component_keys = ["sgst_total", "cgst_total", "igst_total"]
+        components = [data.get(k) for k in component_keys if data.get(k) is not None]
+        if components:
+            component_sum = round(sum(float(v) for v in components), 2)
+            if abs(tax - component_sum) > 2.0:
+                data["tax"] = component_sum if component_sum > 0 else None
+                if data["tax"] is None:
+                    data["tax_rate"] = None
+
+    tax = data.get("tax")
+    total = data.get("total")
+    net_amount = data.get("net_amount")
+    if tax is not None and total is not None and net_amount is not None:
+        shipping = data.get("shipping_charges") or 0.0
+        discount = data.get("discount") or 0.0
+        expected_total = net_amount + tax + shipping - discount
+        tolerance = max(2.0, round(total * 0.02, 2))
+        if abs(total - expected_total) > tolerance:
+            data["tax"] = None
+            data["tax_rate"] = None
 
     bank = data.get("bank_details")
     if isinstance(bank, dict):
@@ -324,6 +483,170 @@ def _sanitize_invoice_data(raw_data: Dict[str, Any]) -> Dict[str, Any]:
                 item_data["hsn_code"] = compact if HSN_PATTERN.fullmatch(compact) else None
 
             cleaned_items.append(item_data)
+        data["items"] = cleaned_items
+
+    return data
+
+def _sanitize_po_data(raw_data: Dict[str, Any]) -> Dict[str, Any]:
+    data = dict(raw_data)
+
+    data["payment_terms"] = _clean_optional_text(data.get("payment_terms"))
+    data["currency"] = _clean_optional_text(data.get("currency")) or data.get("currency")
+    data["po_number"] = _clean_optional_text(data.get("po_number")) or data.get("po_number")
+    data["date"] = _clean_optional_text(data.get("date")) or data.get("date")
+    data["total_amount"] = _to_float_or_none(data.get("total_amount"))
+
+    items = data.get("items")
+    if isinstance(items, list):
+        cleaned_items = []
+        for item in items:
+            if not isinstance(item, dict):
+                continue
+            item_data = dict(item)
+            item_data["description"] = _clean_optional_text(item_data.get("description")) or item_data.get("description")
+            item_data["product_code"] = _clean_optional_text(item_data.get("product_code"))
+            item_data["line_number"] = _to_float_or_none(item_data.get("line_number"))
+            if item_data["line_number"] is not None and item_data["line_number"] <= 0:
+                item_data["line_number"] = None
+            item_data["unit_price"] = _to_float_or_none(item_data.get("unit_price"))
+            item_data["quantity"] = _to_float_or_none(item_data.get("quantity"))
+            item_data["line_amount"] = _to_float_or_none(item_data.get("line_amount"))
+            cleaned_items.append(item_data)
+        data["items"] = cleaned_items
+
+    return data
+
+def _sanitize_grn_data(raw_data: Dict[str, Any]) -> Dict[str, Any]:
+    data = dict(raw_data)
+
+    for key in ["grn_number", "po_reference", "supplier_name"]:
+        data[key] = _clean_optional_text(data.get(key))
+
+    date_received = _clean_optional_text(data.get("date_received"))
+    if isinstance(date_received, str) and date_received in {"1970-01-01", "1900-01-01", "0001-01-01", "0000-00-00"}:
+        date_received = None
+    data["date_received"] = date_received
+
+    items = data.get("items")
+    if isinstance(items, list):
+        cleaned_items = []
+        for item in items:
+            if not isinstance(item, dict):
+                continue
+            item_data = dict(item)
+            item_data["item_description"] = _clean_optional_text(item_data.get("item_description"))
+            item_data["item_part_no"] = _clean_optional_text(item_data.get("item_part_no"))
+
+            for key in ["qty_ordered", "qty_received", "unit_price", "amount"]:
+                item_data[key] = _to_float_or_none(item_data.get(key))
+                if item_data[key] is not None and item_data[key] < 0:
+                    item_data[key] = None
+
+            # `0` in optional financial fields is often a hallucinated fallback in quantity-only GRNs.
+            if _is_zero(item_data.get("unit_price")):
+                item_data["unit_price"] = None
+
+            cleaned_items.append(item_data)
+
+        # Strong anti-hallucination pass for GRN financials:
+        # if financial columns are missing, models often copy qty values into amount.
+        amount_rows = 0
+        mirrored_amount_rows = 0
+        has_positive_unit_price = False
+        has_positive_amount = False
+
+        for item_data in cleaned_items:
+            qty_ordered = item_data.get("qty_ordered")
+            qty_received = item_data.get("qty_received")
+            unit_price = item_data.get("unit_price")
+            amount = item_data.get("amount")
+
+            if amount is not None:
+                amount_rows += 1
+                mirrors_qty_ordered = _is_close(amount, qty_ordered)
+                mirrors_qty_received = _is_close(amount, qty_received)
+                if mirrors_qty_ordered or mirrors_qty_received:
+                    mirrored_amount_rows += 1
+                    # If amount mirrors quantity, it's likely not a true financial column.
+                    if unit_price is None or _is_close(unit_price, amount):
+                        item_data["amount"] = None
+                    if unit_price is not None and _is_close(unit_price, amount):
+                        item_data["unit_price"] = None
+                    if mirrors_qty_ordered and qty_received is not None and not _is_close(qty_ordered, qty_received):
+                        item_data["qty_ordered"] = None
+
+            if item_data.get("unit_price") is not None and item_data["unit_price"] > 0:
+                has_positive_unit_price = True
+            if item_data.get("amount") is not None and item_data["amount"] > 0:
+                has_positive_amount = True
+
+        # If all financials are absent/zero, force both optional financial fields to null.
+        if not has_positive_unit_price and not has_positive_amount:
+            for item_data in cleaned_items:
+                item_data["unit_price"] = None
+                item_data["amount"] = None
+        else:
+            # If amounts mostly mirror qty and there is no positive price evidence, treat as hallucinated.
+            mirror_ratio = (mirrored_amount_rows / amount_rows) if amount_rows else 0.0
+            if mirror_ratio >= 0.67 and not has_positive_unit_price:
+                for item_data in cleaned_items:
+                    item_data["amount"] = None
+
+            # If amount == unit_price across rows but multiplication checks fail,
+            # treat these as repeated placeholders and drop financials.
+            rows_with_financial = 0
+            rows_with_equal_price_amount = 0
+            rows_with_math_support = 0
+            for item_data in cleaned_items:
+                qty_ordered = item_data.get("qty_ordered")
+                qty_received = item_data.get("qty_received")
+                unit_price = item_data.get("unit_price")
+                amount = item_data.get("amount")
+
+                if unit_price is None and amount is None:
+                    continue
+                rows_with_financial += 1
+
+                if unit_price is not None and amount is not None and _is_close(unit_price, amount):
+                    rows_with_equal_price_amount += 1
+
+                supported = False
+                if unit_price is not None and amount is not None:
+                    for qty in [qty_received, qty_ordered]:
+                        if qty is None:
+                            continue
+                        expected = unit_price * qty
+                        tol = max(0.05, abs(expected) * 0.02)
+                        if abs(amount - expected) <= tol:
+                            supported = True
+                            break
+                    if not supported and _is_close(amount, unit_price):
+                        # qty==1 is one valid case where amount can equal unit_price.
+                        if _is_close(qty_received, 1.0) or _is_close(qty_ordered, 1.0):
+                            supported = True
+
+                if supported:
+                    rows_with_math_support += 1
+
+            if rows_with_financial >= 2:
+                equal_ratio = rows_with_equal_price_amount / rows_with_financial
+                support_ratio = rows_with_math_support / rows_with_financial
+                if equal_ratio >= 0.67 and support_ratio < 0.34:
+                    for item_data in cleaned_items:
+                        item_data["unit_price"] = None
+                        item_data["amount"] = None
+                        qty_ordered = item_data.get("qty_ordered")
+                        qty_received = item_data.get("qty_received")
+                        if (
+                            qty_ordered is not None
+                            and qty_received is not None
+                            and not _is_integerish(qty_ordered)
+                            and _is_integerish(qty_received)
+                            and qty_received > 1
+                            and not _is_close(qty_ordered, qty_received)
+                        ):
+                            item_data["qty_ordered"] = None
+
         data["items"] = cleaned_items
 
     return data
@@ -405,6 +728,8 @@ class InvoiceItem(BaseModel):
 class Invoice(BaseModel):
     name: str = Field(..., description="Vendor Name")
     vendor_addr: Optional[str] = Field(None, description="Vendor Address")
+    pan_no: Optional[str] = Field(None, description="PAN Number")
+    msme_number: Optional[str] = Field(None, description="MSME/Udyam Aadhaar Number")
     billing_name: Optional[str] = Field(None, description="Billing Name")
     billing_addr: Optional[str] = Field(None, description="Billing Address")
     shipping_addr: Optional[str] = Field(None, description="Shipping Address")
@@ -451,6 +776,7 @@ class PurchaseOrder(BaseModel):
     date: str
     currency: str
     total_amount: float
+    payment_terms: Optional[str] = None
     items: List[POItem] = Field(default_factory=list)
 
 class GRNItem(BaseModel):
@@ -458,6 +784,8 @@ class GRNItem(BaseModel):
     item_part_no: Optional[str] = None
     qty_ordered: Optional[float] = None
     qty_received: Optional[float] = None
+    unit_price: Optional[float] = None
+    amount: Optional[float] = None
 
 class GoodsReceivedNote(BaseModel):
     grn_number: Optional[str] = None
@@ -502,13 +830,13 @@ async def extract_document_chunk(gemini_file, doc_type: str, page_range: List[in
     start_time = time.time()
     
     if doc_type == "po":
-        prompt = PO_PROMPT
+        prompt = PO_PROMPT + "\n" + GLOBAL_EXTRA_GUARDRAILS + "\n" + PO_EXTRA_GUARDRAILS
         schema = PurchaseOrder
     elif doc_type == "grn":
-        prompt = GRN_PROMPT
+        prompt = GRN_PROMPT + "\n" + GLOBAL_EXTRA_GUARDRAILS + "\n" + GRN_EXTRA_GUARDRAILS
         schema = GoodsReceivedNote
     else:
-        prompt = INVOICE_PROMPT + "\n" + INVOICE_EXTRA_GUARDRAILS
+        prompt = INVOICE_PROMPT + "\n" + GLOBAL_EXTRA_GUARDRAILS + "\n" + INVOICE_EXTRA_GUARDRAILS
         schema = Invoice
 
     num_pages = page_range[1] - page_range[0] + 1
@@ -542,6 +870,12 @@ async def extract_document_chunk(gemini_file, doc_type: str, page_range: List[in
         if doc_type == "invoice":
             data_payload = _sanitize_invoice_data(data_payload)
             data_obj = Invoice.model_validate(data_payload)
+        elif doc_type == "po":
+            data_payload = _sanitize_po_data(data_payload)
+            data_obj = PurchaseOrder.model_validate(data_payload)
+        elif doc_type == "grn":
+            data_payload = _sanitize_grn_data(data_payload)
+            data_obj = GoodsReceivedNote.model_validate(data_payload)
         cost = calculate_cost(
             CONFIG["EXTRACTOR_MODEL"], 
             usage["prompt_token_count"] if usage else 0, 
