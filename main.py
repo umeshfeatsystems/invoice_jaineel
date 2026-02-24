@@ -113,6 +113,7 @@ GLOBAL_EXTRA_GUARDRAILS = """
 PO_EXTRA_GUARDRAILS = """
 ### PO HALLUCINATION GUARDRAILS
 - Populate optional fields only when explicitly present with matching labels.
+- `vendor_name`: extract only from explicit seller anchors (Vendor, Supplier, To, Ship From).
 - Do not synthesize line-level values from totals or vice versa.
 - If any optional field is missing/unclear, return null.
 """
@@ -491,6 +492,7 @@ def _sanitize_po_data(raw_data: Dict[str, Any]) -> Dict[str, Any]:
     data = dict(raw_data)
 
     data["payment_terms"] = _clean_optional_text(data.get("payment_terms"))
+    data["vendor_name"] = _clean_optional_text(data.get("vendor_name")) or _clean_optional_text(data.get("supplier_name"))
     data["currency"] = _clean_optional_text(data.get("currency")) or data.get("currency")
     data["po_number"] = _clean_optional_text(data.get("po_number")) or data.get("po_number")
     data["date"] = _clean_optional_text(data.get("date")) or data.get("date")
@@ -774,6 +776,7 @@ class POItem(BaseModel):
 class PurchaseOrder(BaseModel):
     po_number: str
     date: str
+    vendor_name: Optional[str] = None
     currency: str
     total_amount: float
     payment_terms: Optional[str] = None
