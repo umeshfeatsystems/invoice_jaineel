@@ -114,12 +114,32 @@ PO_EXTRA_GUARDRAILS = """
 ### PO HALLUCINATION GUARDRAILS
 - Populate optional fields only when explicitly present with matching labels.
 - `vendor_name`: extract only from explicit seller anchors (Vendor, Supplier, To, Ship From).
+- Extract these PO fields only when explicitly labeled:
+  - `purchase_order_expiry_date`: Purchase Order Expiry date / PO Expiry Date
+  - `delivery_by_date`: Delivery by date / Deliver By Date
+  - `vendor_address`: Vendor Address
+  - `supplier_code`: Supplier Code
+  - `billing_name`: Billing Name
+  - `billing_address`: Billing Address
+  - `delivery_name`: Delivery Name
+  - `delivery_address`: Delivery Address
+- For PO line items, use these exact additional keys when columns exist:
+  - `delivery_dates` from Delivery Date / Delivery Dates
+  - `units_of_measure` from Unit / UOM / Units Of Measure
+  - `net_amounts` from Net Amount / Net Amounts
+  - `tax_amounts` from Tax Amount / Tax Amounts
+  - `tax_rate` from Tax Rate
 - Do not synthesize line-level values from totals or vice versa.
 - If any optional field is missing/unclear, return null.
 """
 
 GRN_EXTRA_GUARDRAILS = """
 ### GRN OPTIONAL FINANCIAL FIELDS
+- Extract these GRN fields only when explicitly labeled:
+  - `merchant_address`: Merchant Address
+  - `merchant_phone_number`: Merchant Phone Number
+  - `total_amount`: Total Amount
+  - `tax_amount`: Tax Amount
 - For each GRN line item, extract financial values if explicitly present:
   - `unit_price` from labels: Unit Price, Rate, Price
   - `amount` from labels: Amount, Line Amount, Total
@@ -496,6 +516,17 @@ def _sanitize_po_data(raw_data: Dict[str, Any]) -> Dict[str, Any]:
     data["currency"] = _clean_optional_text(data.get("currency")) or data.get("currency")
     data["po_number"] = _clean_optional_text(data.get("po_number")) or data.get("po_number")
     data["date"] = _clean_optional_text(data.get("date")) or data.get("date")
+    for key in [
+        "purchase_order_expiry_date",
+        "delivery_by_date",
+        "vendor_address",
+        "supplier_code",
+        "billing_name",
+        "billing_address",
+        "delivery_name",
+        "delivery_address",
+    ]:
+        data[key] = _clean_optional_text(data.get(key))
     data["total_amount"] = _to_float_or_none(data.get("total_amount"))
 
     items = data.get("items")
@@ -513,6 +544,12 @@ def _sanitize_po_data(raw_data: Dict[str, Any]) -> Dict[str, Any]:
             item_data["unit_price"] = _to_float_or_none(item_data.get("unit_price"))
             item_data["quantity"] = _to_float_or_none(item_data.get("quantity"))
             item_data["line_amount"] = _to_float_or_none(item_data.get("line_amount"))
+            item_data["delivery_dates"] = _clean_optional_text(item_data.get("delivery_dates"))
+            item_data["units_of_measure"] = _clean_optional_text(item_data.get("units_of_measure"))
+            for key in ["net_amounts", "tax_amounts", "tax_rate"]:
+                item_data[key] = _to_float_or_none(item_data.get(key))
+                if item_data[key] is not None and item_data[key] < 0:
+                    item_data[key] = None
             cleaned_items.append(item_data)
         data["items"] = cleaned_items
 
@@ -521,13 +558,25 @@ def _sanitize_po_data(raw_data: Dict[str, Any]) -> Dict[str, Any]:
 def _sanitize_grn_data(raw_data: Dict[str, Any]) -> Dict[str, Any]:
     data = dict(raw_data)
 
-    for key in ["grn_number", "po_reference", "supplier_name"]:
+    for key in [
+        "grn_number",
+        "po_reference",
+        "supplier_name",
+        "merchant_address",
+        "merchant_phone_number",
+    ]:
         data[key] = _clean_optional_text(data.get(key))
 
     date_received = _clean_optional_text(data.get("date_received"))
     if isinstance(date_received, str) and date_received in {"1970-01-01", "1900-01-01", "0001-01-01", "0000-00-00"}:
         date_received = None
     data["date_received"] = date_received
+    data["total_amount"] = _to_float_or_none(data.get("total_amount"))
+    if data["total_amount"] is not None and data["total_amount"] < 0:
+        data["total_amount"] = None
+    data["tax_amount"] = _to_float_or_none(data.get("tax_amount"))
+    if data["tax_amount"] is not None and data["tax_amount"] < 0:
+        data["tax_amount"] = None
 
     items = data.get("items")
     if isinstance(items, list):
@@ -772,11 +821,24 @@ class POItem(BaseModel):
     unit_price: float
     quantity: float
     line_amount: float
+    delivery_dates: Optional[str] = Field(None, description="Delivery Dates")
+    units_of_measure: Optional[str] = Field(None, description="Units Of Measure")
+    net_amounts: Optional[float] = Field(None, description="Net Amounts")
+    tax_amounts: Optional[float] = Field(None, description="Tax Amounts")
+    tax_rate: Optional[float] = Field(None, description="Tax Rate")
 
 class PurchaseOrder(BaseModel):
     po_number: str
     date: str
     vendor_name: Optional[str] = None
+    purchase_order_expiry_date: Optional[str] = Field(None, description="Purchase Order Expiry date")
+    delivery_by_date: Optional[str] = Field(None, description="Delivery by date")
+    vendor_address: Optional[str] = Field(None, description="Vendor Address")
+    supplier_code: Optional[str] = Field(None, description="Supplier Code")
+    billing_name: Optional[str] = Field(None, description="Billing Name")
+    billing_address: Optional[str] = Field(None, description="Billing Address")
+    delivery_name: Optional[str] = Field(None, description="Delivery Name")
+    delivery_address: Optional[str] = Field(None, description="Delivery Address")
     currency: str
     total_amount: float
     payment_terms: Optional[str] = None
@@ -795,6 +857,10 @@ class GoodsReceivedNote(BaseModel):
     date_received: Optional[str] = None
     po_reference: Optional[str] = None
     supplier_name: Optional[str] = None
+    merchant_address: Optional[str] = Field(None, description="Merchant Address")
+    merchant_phone_number: Optional[str] = Field(None, description="Merchant Phone Number")
+    total_amount: Optional[float] = Field(None, description="Total Amount")
+    tax_amount: Optional[float] = Field(None, description="Tax Amount")
     items: List[GRNItem] = Field(default_factory=list)
 
 # ==========================================

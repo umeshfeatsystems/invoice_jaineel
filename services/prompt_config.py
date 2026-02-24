@@ -645,6 +645,30 @@ PO_FIELDS: Dict[str, FieldConfig] = {
         ]
     ),
 
+    "purchase_order_expiry_date": FieldConfig(
+        name="purchase_order_expiry_date",
+        display_name="Purchase Order Expiry date",
+        field_type=FieldType.DATE,
+        description="PO validity/expiry date",
+        extraction_guidelines=[
+            "**ANCHOR LABELS**: 'Purchase Order Expiry date', 'PO Expiry Date', 'Expiry Date'",
+            "**FORMAT**: Convert to ISO format YYYY-MM-DD",
+            "**NEGATIVE RULE**: NOT PO issue date"
+        ]
+    ),
+
+    "delivery_by_date": FieldConfig(
+        name="delivery_by_date",
+        display_name="Delivery by date",
+        field_type=FieldType.DATE,
+        description="Requested or promised delivery by date",
+        extraction_guidelines=[
+            "**ANCHOR LABELS**: 'Delivery by date', 'Deliver By', 'Required By', 'Need By Date'",
+            "**FORMAT**: Convert to ISO format YYYY-MM-DD",
+            "**NEGATIVE RULE**: NOT PO issue date"
+        ]
+    ),
+
     "vendor_name": FieldConfig(
         name="vendor_name",
         display_name="Vendor Name",
@@ -668,6 +692,17 @@ PO_FIELDS: Dict[str, FieldConfig] = {
             "**LOCATION**: Below vendor name",
             "**CRITICAL**: Extract complete full address",
             "**CONCATENATION**: Join multi-line addresses with comma-space"
+        ]
+    ),
+
+    "supplier_code": FieldConfig(
+        name="supplier_code",
+        display_name="Supplier Code",
+        field_type=FieldType.STRING,
+        description="Supplier or vendor code identifier",
+        extraction_guidelines=[
+            "**ANCHOR LABELS**: 'Supplier Code', 'Vendor Code', 'Supplier ID'",
+            "**FORMAT**: Preserve exact alphanumeric format"
         ]
     ),
 
@@ -706,6 +741,50 @@ PO_FIELDS: Dict[str, FieldConfig] = {
             "**ANCHOR LABELS**: 'Ship To', 'Deliver To', 'Delivery Location'",
             "**FALLBACK**: If not specified, may be same as buyer_name",
             "**FORMAT**: Company or facility name"
+        ]
+    ),
+
+    "billing_name": FieldConfig(
+        name="billing_name",
+        display_name="Billing Name",
+        field_type=FieldType.STRING,
+        description="Billing party name",
+        extraction_guidelines=[
+            "**ANCHOR LABELS**: 'Billing Name', 'Bill To', 'Billing Party'",
+            "**FORMAT**: Full name as printed"
+        ]
+    ),
+
+    "billing_address": FieldConfig(
+        name="billing_address",
+        display_name="Billing Address",
+        field_type=FieldType.STRING,
+        description="Billing address details",
+        extraction_guidelines=[
+            "**ANCHOR LABELS**: 'Billing Address', 'Bill To Address'",
+            "**CRITICAL**: Extract full multi-line billing address"
+        ]
+    ),
+
+    "delivery_name": FieldConfig(
+        name="delivery_name",
+        display_name="Delivery Name",
+        field_type=FieldType.STRING,
+        description="Delivery party or destination name",
+        extraction_guidelines=[
+            "**ANCHOR LABELS**: 'Delivery Name', 'Deliver To', 'Ship To Name'",
+            "**FORMAT**: Full name as printed"
+        ]
+    ),
+
+    "delivery_address": FieldConfig(
+        name="delivery_address",
+        display_name="Delivery Address",
+        field_type=FieldType.STRING,
+        description="Delivery destination address",
+        extraction_guidelines=[
+            "**ANCHOR LABELS**: 'Delivery Address', 'Ship To Address', 'Deliver To Address'",
+            "**CRITICAL**: Extract full multi-line delivery address"
         ]
     ),
 
@@ -857,6 +936,62 @@ PO_ITEM_FIELDS: Dict[str, FieldConfig] = {
             "**FORMAT**: Convert to ISO format YYYY-MM-DD",
             "**DEFAULT**: Return null if not item-specific"
         ]
+    ),
+
+    "delivery_dates": FieldConfig(
+        name="delivery_dates",
+        display_name="Delivery Dates",
+        field_type=FieldType.DATE,
+        description="Line item delivery date",
+        extraction_guidelines=[
+            "**COLUMN HEADERS**: 'Delivery Date', 'Delivery Dates', 'Deliver By'",
+            "**FORMAT**: Convert to ISO format YYYY-MM-DD",
+            "**DEFAULT**: Return null when not present at line-item level"
+        ]
+    ),
+
+    "units_of_measure": FieldConfig(
+        name="units_of_measure",
+        display_name="Units Of Measure",
+        field_type=FieldType.STRING,
+        description="Line item unit of measure",
+        extraction_guidelines=[
+            "**COLUMN HEADERS**: 'Units Of Measure', 'UOM', 'Unit'",
+            "**FORMAT**: Preserve printed unit abbreviation"
+        ]
+    ),
+
+    "net_amounts": FieldConfig(
+        name="net_amounts",
+        display_name="Net Amounts",
+        field_type=FieldType.NUMBER,
+        description="Line item net amount before tax",
+        extraction_guidelines=[
+            "**COLUMN HEADERS**: 'Net Amount', 'Net Amounts', 'Net'",
+            "**FORMAT**: Numeric value only"
+        ]
+    ),
+
+    "tax_amounts": FieldConfig(
+        name="tax_amounts",
+        display_name="Tax Amounts",
+        field_type=FieldType.NUMBER,
+        description="Line item tax amount",
+        extraction_guidelines=[
+            "**COLUMN HEADERS**: 'Tax Amount', 'Tax Amounts', 'GST Amount', 'VAT Amount'",
+            "**FORMAT**: Numeric value only"
+        ]
+    ),
+
+    "tax_rate": FieldConfig(
+        name="tax_rate",
+        display_name="Tax Rate",
+        field_type=FieldType.NUMBER,
+        description="Line item tax rate percentage",
+        extraction_guidelines=[
+            "**COLUMN HEADERS**: 'Tax Rate', 'GST %', 'VAT %', 'Tax %'",
+            "**FORMAT**: Numeric percentage value"
+        ]
     )
 }
 
@@ -912,6 +1047,28 @@ GRN_FIELDS: Dict[str, FieldConfig] = {
         extraction_guidelines=[
             "**ANCHOR LABELS**: 'Supplier', 'Vendor', 'From', 'Delivered By'",
             "**FORMAT**: Full company name"
+        ]
+    ),
+
+    "merchant_address": FieldConfig(
+        name="merchant_address",
+        display_name="Merchant Address",
+        field_type=FieldType.STRING,
+        description="Merchant address details",
+        extraction_guidelines=[
+            "**ANCHOR LABELS**: 'Merchant Address', 'Supplier Address', 'Vendor Address'",
+            "**CRITICAL**: Extract full multi-line address"
+        ]
+    ),
+
+    "merchant_phone_number": FieldConfig(
+        name="merchant_phone_number",
+        display_name="Merchant Phone Number",
+        field_type=FieldType.STRING,
+        description="Merchant contact phone number",
+        extraction_guidelines=[
+            "**ANCHOR LABELS**: 'Merchant Phone Number', 'Phone', 'Contact No', 'Tel'",
+            "**FORMAT**: Preserve digits and leading + if present"
         ]
     ),
 
@@ -979,6 +1136,28 @@ GRN_FIELDS: Dict[str, FieldConfig] = {
             "**ANCHOR LABELS**: 'Total Packages', 'No of Packages', 'Package Count'",
             "**FORMAT**: Integer value",
             "**VALIDATION**: Must be positive number"
+        ]
+    ),
+
+    "total_amount": FieldConfig(
+        name="total_amount",
+        display_name="Total Amount",
+        field_type=FieldType.NUMBER,
+        description="Document total amount",
+        extraction_guidelines=[
+            "**ANCHOR LABELS**: 'Total Amount', 'Grand Total', 'Total'",
+            "**FORMAT**: Numeric value only"
+        ]
+    ),
+
+    "tax_amount": FieldConfig(
+        name="tax_amount",
+        display_name="Tax Amount",
+        field_type=FieldType.NUMBER,
+        description="Document tax amount",
+        extraction_guidelines=[
+            "**ANCHOR LABELS**: 'Tax Amount', 'Total Tax', 'GST Amount', 'VAT Amount'",
+            "**FORMAT**: Numeric value only"
         ]
     )
 }
