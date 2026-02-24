@@ -15,7 +15,7 @@ import shutil
 import re
 import math
 from typing import List, Optional, Dict, Any
-from datetime import datetime
+from datetime import datetime, timedelta
 
 import uvicorn
 import google.generativeai as genai
@@ -135,6 +135,10 @@ PO_EXTRA_GUARDRAILS = """
   - `net_amounts` from Net Amount / Net Amounts
   - `tax_amounts` from Tax Amount / Tax Amounts
   - `tax_rate` from Tax Rate
+- DATE ANTI-COPY RULE: If only one header date is visible, map it only to `date`.
+- Never copy `date` into `purchase_order_expiry_date` or `delivery_by_date` without explicit labels.
+- ADDRESS ANTI-COPY RULE: If only `Deliver To` is present and no explicit `Bill To`, keep `billing_name` and `billing_address` as null.
+- Never copy `delivery_name`/`delivery_address` into billing fields.
 - Do not synthesize line-level values from totals or vice versa.
 - If any optional field is missing/unclear, return null.
 """
@@ -185,6 +189,7 @@ ROUTING_PATTERN = re.compile(r"^\d{5,12}$")
 BANK_ACCOUNT_PATTERN = re.compile(r"^[A-Z0-9\-]{4,34}$", re.IGNORECASE)
 PAN_PATTERN = re.compile(r"^[A-Z]{5}[0-9]{4}[A-Z]$")
 LINE_NO_PATTERN = re.compile(r"^\s*(?:sr\.?\s*no\.?|s\.?\s*no\.?|line|item)?\s*[:#\-]?\s*(\d{1,5})\s*[.)\-]?\s*$", re.IGNORECASE)
+DATE_PLACEHOLDER_VALUES = {"1970-01-01", "1900-01-01", "0001-01-01", "0000-00-00"}
 
 # ==========================================
 # SCHEMAS
@@ -382,6 +387,75 @@ def _normalize_line_no(value: Any) -> Optional[str]:
     compact = re.sub(r"[^A-Za-z0-9._\-\/]", "", text)
     return compact or None
 
+def _normalize_date_value(value: Any) -> Optional[str]:
+    text = _clean_optional_text(value)
+    if not isinstance(text, str):
+        return None
+
+    text = text.strip()
+    if not text:
+        return None
+    if text in DATE_PLACEHOLDER_VALUES:
+        return None
+
+    direct_iso_match = re.match(r"^(\d{4}-\d{2}-\d{2})", text)
+    if direct_iso_match:
+        iso = direct_iso_match.group(1)
+        return None if iso in DATE_PLACEHOLDER_VALUES else iso
+
+    normalized = re.sub(r"\s+", " ", text.replace("\\", "/").replace(".", "/")).strip()
+    date_formats = [
+        "%Y/%m/%d",
+        "%d/%m/%Y",
+        "%m/%d/%Y",
+        "%d-%m-%Y",
+        "%d %b %Y",
+        "%d %B %Y",
+        "%b %d %Y",
+        "%B %d %Y",
+    ]
+    for fmt in date_formats:
+        try:
+            return datetime.strptime(normalized, fmt).strftime("%Y-%m-%d")
+        except ValueError:
+            continue
+
+    # Keep original text if explicit but unparseable; avoids dropping valid non-standard date text.
+    return text
+
+def _same_date_value(a: Any, b: Any) -> bool:
+    da = _normalize_date_value(a)
+    db = _normalize_date_value(b)
+    return bool(da and db and da == db)
+
+def _extract_payment_term_days(value: Any) -> Optional[int]:
+    text = _clean_optional_text(value)
+    if not isinstance(text, str):
+        return None
+    lowered = text.lower()
+
+    for pattern in [r"net\s*[-:]?\s*(\d{1,3})", r"(\d{1,3})\s*day(?:'s|s)?\b", r"(\d{1,3})\s*d\b"]:
+        match = re.search(pattern, lowered)
+        if not match:
+            continue
+        try:
+            days = int(match.group(1))
+        except (TypeError, ValueError):
+            continue
+        if 1 <= days <= 365:
+            return days
+    return None
+
+def _add_days_to_iso_date(date_value: Any, days: Optional[int]) -> Optional[str]:
+    iso = _normalize_date_value(date_value)
+    if not iso or days is None:
+        return None
+    try:
+        base = datetime.strptime(iso, "%Y-%m-%d")
+    except ValueError:
+        return None
+    return (base + timedelta(days=days)).strftime("%Y-%m-%d")
+
 def _sanitize_invoice_data(raw_data: Dict[str, Any]) -> Dict[str, Any]:
     data = dict(raw_data)
     suspicious_tokens = _collect_suspicious_invoice_tokens(data)
@@ -393,8 +467,6 @@ def _sanitize_invoice_data(raw_data: Dict[str, Any]) -> Dict[str, Any]:
         "shipping_addr",
         "pan_no",
         "msme_number",
-        "due_date",
-        "shipping_date",
         "payment_terms",
         "payment_addr",
         "vendor_vat_no",
@@ -405,6 +477,18 @@ def _sanitize_invoice_data(raw_data: Dict[str, Any]) -> Dict[str, Any]:
 
     vendor_email = _null_if_suspicious(_clean_optional_text(data.get("vendor_email")), suspicious_tokens)
     data["vendor_email"] = vendor_email if isinstance(vendor_email, str) and EMAIL_PATTERN.fullmatch(vendor_email) else None
+
+    invoice_date = _normalize_date_value(data.get("date"))
+    data["date"] = invoice_date if invoice_date is not None else _clean_optional_text(data.get("date")) or data.get("date")
+
+    due_date = _normalize_date_value(data.get("due_date"))
+    shipping_date = _normalize_date_value(data.get("shipping_date"))
+    if _same_date_value(due_date, data.get("date")):
+        due_date = None
+    if _same_date_value(shipping_date, data.get("date")):
+        shipping_date = None
+    data["due_date"] = due_date
+    data["shipping_date"] = shipping_date
 
     for key in ["vendor_gstin", "billing_gstin"]:
         gst_val = _null_if_suspicious(_clean_optional_text(data.get(key)), suspicious_tokens)
@@ -637,18 +721,58 @@ def _sanitize_po_data(raw_data: Dict[str, Any]) -> Dict[str, Any]:
     data["vendor_name"] = _clean_optional_text(data.get("vendor_name")) or _clean_optional_text(data.get("supplier_name"))
     data["currency"] = _clean_optional_text(data.get("currency")) or data.get("currency")
     data["po_number"] = _clean_optional_text(data.get("po_number")) or data.get("po_number")
-    data["date"] = _clean_optional_text(data.get("date")) or data.get("date")
-    for key in [
-        "purchase_order_expiry_date",
-        "delivery_by_date",
-        "vendor_address",
-        "supplier_code",
-        "billing_name",
-        "billing_address",
-        "delivery_name",
-        "delivery_address",
-    ]:
+    po_date = _normalize_date_value(data.get("date"))
+    data["date"] = po_date if po_date is not None else _clean_optional_text(data.get("date")) or data.get("date")
+
+    expiry_date = _normalize_date_value(data.get("purchase_order_expiry_date"))
+    delivery_by_date = _normalize_date_value(data.get("delivery_by_date"))
+
+    # Anti-cloning rule: do not allow optional PO dates to repeat PO date.
+    if _same_date_value(expiry_date, data.get("date")):
+        expiry_date = None
+    if _same_date_value(delivery_by_date, data.get("date")):
+        delivery_by_date = None
+
+    # Anti-inference rule: never derive optional PO dates from payment terms.
+    # Example hallucination to block: PO date + "Net 30" => expiry date.
+    term_days = _extract_payment_term_days(data.get("payment_terms"))
+    derived_date = _add_days_to_iso_date(data.get("date"), term_days)
+    if derived_date is not None:
+        if _same_date_value(expiry_date, derived_date):
+            expiry_date = None
+        if _same_date_value(delivery_by_date, derived_date):
+            delivery_by_date = None
+
+    data["purchase_order_expiry_date"] = expiry_date
+    data["delivery_by_date"] = delivery_by_date
+    for key in ["vendor_address", "supplier_code", "billing_name", "billing_address", "delivery_name", "delivery_address"]:
         data[key] = _clean_optional_text(data.get(key))
+
+    # Anti-duplication rule: when model mirrors Deliver-To into Billing fields,
+    # null billing values unless they are independently distinguishable.
+    billing_name = data.get("billing_name")
+    billing_address = data.get("billing_address")
+    delivery_name = data.get("delivery_name")
+    delivery_address = data.get("delivery_address")
+
+    same_name = (
+        isinstance(billing_name, str)
+        and isinstance(delivery_name, str)
+        and _normalize_token(billing_name) == _normalize_token(delivery_name)
+    )
+    same_address = (
+        isinstance(billing_address, str)
+        and isinstance(delivery_address, str)
+        and _normalize_token(billing_address) == _normalize_token(delivery_address)
+    )
+
+    if same_address:
+        data["billing_address"] = None
+        if same_name:
+            data["billing_name"] = None
+    elif same_name and isinstance(delivery_address, str) and not billing_address:
+        data["billing_name"] = None
+
     data["total_amount"] = _to_float_or_none(data.get("total_amount"))
 
     items = data.get("items")
@@ -689,9 +813,7 @@ def _sanitize_grn_data(raw_data: Dict[str, Any]) -> Dict[str, Any]:
     ]:
         data[key] = _clean_optional_text(data.get(key))
 
-    date_received = _clean_optional_text(data.get("date_received"))
-    if isinstance(date_received, str) and date_received in {"1970-01-01", "1900-01-01", "0001-01-01", "0000-00-00"}:
-        date_received = None
+    date_received = _normalize_date_value(data.get("date_received"))
     data["date_received"] = date_received
     data["total_amount"] = _to_float_or_none(data.get("total_amount"))
     if data["total_amount"] is not None and data["total_amount"] < 0:

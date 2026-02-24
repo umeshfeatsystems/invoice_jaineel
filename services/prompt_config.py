@@ -1,4 +1,4 @@
-"""
+﻿"""
 Standardized JSON-based Prompt Configuration System
 ====================================================
 Scope: Commercial Invoices, Purchase Orders (PO), and Goods Received Notes (GRN).
@@ -151,7 +151,7 @@ INVOICE_FIELDS: Dict[str, FieldConfig] = {
             "**ANCHOR LABELS**: 'Currency', 'Curr', 'Amount in', 'All values in'",
             "**LOCATION**: Near Total Amount, or in header section",
             "**FORMAT**: Extract 3-letter ISO code only (USD, EUR, SGD, INR, JPY, GBP, CHF)",
-            "**SYMBOL MAPPING**: $ → USD (unless context says SGD/AUD), € → EUR, £ → GBP, ¥ → JPY/CNY",
+            "**SYMBOL MAPPING**: $ â†’ USD (unless context says SGD/AUD), â‚¬ â†’ EUR, Â£ â†’ GBP, Â¥ â†’ JPY/CNY",
             "**PRIORITY**: Explicit text 'US Dollars' > Symbol $ alone",
             "**NEGATIVE RULE**: Do NOT guess if no clear indicator exists"
         ]
@@ -167,7 +167,7 @@ INVOICE_FIELDS: Dict[str, FieldConfig] = {
             "**LOCATION**: Bottom of invoice, after line items",
             "**SELECTOR RULE**: If multiple totals exist, pick the LARGEST value (usually includes tax/freight)",
             "**PRIORITY ORDER**: 'Grand Total' > 'Total' > 'Subtotal'",
-            "**FORMAT**: Remove currency symbols ($ € £), remove thousand separators (,), keep decimal point",
+            "**FORMAT**: Remove currency symbols ($ â‚¬ Â£), remove thousand separators (,), keep decimal point",
             "**NEGATIVE RULE**: Ignore 'Subtotal', 'Items Total' if 'Grand Total' exists"
         ],
         required=True
@@ -364,7 +364,7 @@ INVOICE_FIELDS: Dict[str, FieldConfig] = {
             "**ANCHOR LABELS**: 'Exchange Rate', 'Ex. Rate', 'Conversion Rate', 'Rate', 'FX Rate'",
             "**LOCATION**: Usually near currency or total amount section",
             "**FORMAT**: Numeric value with up to 6 decimal places",
-            "**CONTEXT**: Look for pattern like '1 USD = 83.45 INR' → Extract 83.45",
+            "**CONTEXT**: Look for pattern like '1 USD = 83.45 INR' â†’ Extract 83.45",
             "**NEGATIVE RULE**: Do NOT confuse with unit price or discount rate",
             "**DEFAULT**: Return null if no exchange rate mentioned (single currency invoice)"
         ]
@@ -387,7 +387,7 @@ INVOICE_FIELDS: Dict[str, FieldConfig] = {
             "**ABSOLUTE SHIPMENT PHRASE BAN (CRITICAL)**:",
             "  NEVER extract dates near or under: 'Leaving on', 'ETD', 'ETA', 'Dispatch Date'.",
             "**FAIL SAFE (NON-NEGOTIABLE)**:",
-            "  If PO Date is NOT explicitly labeled AND linked to a PO Number → RETURN null."
+            "  If PO Date is NOT explicitly labeled AND linked to a PO Number â†’ RETURN null."
         ]
     ),
 }
@@ -477,7 +477,7 @@ INVOICE_ITEM_FIELDS: Dict[str, FieldConfig] = {
             "**STRICT LOCATION RULE**:",
             "  The code MUST appear in a column or row explicitly labeled for HSN/HS Code.",
             "**FORMAT RULE**:",
-            "  Must be 6–8 digit numeric code (dots allowed).",
+            "  Must be 6â€“8 digit numeric code (dots allowed).",
             "**ROW ISOLATION RULE (CRITICAL)**:",
             "  If the same row contains a Part Number, DO NOT extract any numeric value from that row as HSN.",
             "**HARD NEGATIVE RULES (ABSOLUTE)**:",
@@ -512,7 +512,7 @@ INVOICE_ITEM_FIELDS: Dict[str, FieldConfig] = {
         extraction_guidelines=[
             "**COLUMN HEADERS**: 'UOM', 'Unit', 'U/M', 'Measure', 'UM'",
             "**COMMON VALUES**: PCS, EA, NOS, KG, KGS, LBS, MTR, M, CM, MM, LTR, SET, BOX, CTN, PAL",
-            "**STANDARDIZATION**: 'Pieces' → 'PCS', 'Each' → 'EA', 'Numbers' → 'NOS', 'Kilograms' → 'KG'",
+            "**STANDARDIZATION**: 'Pieces' â†’ 'PCS', 'Each' â†’ 'EA', 'Numbers' â†’ 'NOS', 'Kilograms' â†’ 'KG'",
             "**LOCATION**: Column next to Quantity, or appended to quantity (e.g., '100 PCS')",
             "**FORMAT**: Uppercase abbreviation",
             "**DEFAULT**: Return null if not specified"
@@ -529,7 +529,7 @@ INVOICE_ITEM_FIELDS: Dict[str, FieldConfig] = {
             "**FORMAT**: Numeric, remove currency symbols and thousand separators",
             "**DECIMALS**: Preserve decimal precision (up to 4-6 decimal places common)",
             "**CURRENCY**: Use invoice-level currency for all unit prices",
-            "**VALIDATION**: If unit_price × quantity ≈ amount, extraction is likely correct",
+            "**VALIDATION**: If unit_price Ã— quantity â‰ˆ amount, extraction is likely correct",
             "**NEGATIVE RULE**: NOT the total amount, NOT the extended price"
         ]
     ),
@@ -538,12 +538,12 @@ INVOICE_ITEM_FIELDS: Dict[str, FieldConfig] = {
         name="item_amount",
         display_name="Line Amount",
         field_type=FieldType.NUMBER,
-        description="Total amount for line item (qty × unit price)",
+        description="Total amount for line item (qty Ã— unit price)",
         extraction_guidelines=[
             "**COLUMN HEADERS**: 'Amount', 'Total', 'Extended', 'Line Total', 'Net Amount', 'Value'",
             "**LOCATION**: Usually rightmost column in line items table",
             "**FORMAT**: Numeric, remove currency symbols and thousand separators",
-            "**VALIDATION**: Should approximately equal quantity × unit_price",
+            "**VALIDATION**: Should approximately equal quantity Ã— unit_price",
             "**NEGATIVE RULE**: NOT the invoice grand total, NOT a subtotal row"
         ]
     ),
@@ -560,9 +560,9 @@ INVOICE_ITEM_FIELDS: Dict[str, FieldConfig] = {
             "  Extract a country ONLY if it appears IMMEDIATELY AFTER one of the allowed labels.",
             "  Ignore country names appearing elsewhere in the document.",
             "**COUNTRY NAME NORMALIZATION RULE (CRITICAL)**:",
-            "  ALWAYS return the clean canonical country name ONLY (e.g., 'Made in Germany' → 'Germany').",
+            "  ALWAYS return the clean canonical country name ONLY (e.g., 'Made in Germany' â†’ 'Germany').",
             "**ISO CODE NORMALIZATION RULE (CRITICAL)**:",
-            "  Convert 2-letter ISO codes to full names (e.g., DE → Germany, CN → China).",
+            "  Convert 2-letter ISO codes to full names (e.g., DE â†’ Germany, CN â†’ China).",
             "**ANTI-HALLUCINATION FAIL SAFE (NON-NEGOTIABLE)**:",
             "  If NO allowed label is found, RETURN null."
         ]
@@ -654,7 +654,9 @@ PO_FIELDS: Dict[str, FieldConfig] = {
         extraction_guidelines=[
             "**ANCHOR LABELS**: 'Purchase Order Expiry date', 'PO Expiry Date', 'Expiry Date'",
             "**FORMAT**: Convert to ISO format YYYY-MM-DD",
-            "**NEGATIVE RULE**: NOT PO issue date"
+            "**NEGATIVE RULE**: NOT PO issue date",
+            "**STRICT RULE**: If no explicit expiry/validity label exists, return null",
+            "**NO CALCULATION RULE**: Do NOT compute from payment terms (e.g., Net 30)"
         ]
     ),
 
@@ -666,7 +668,9 @@ PO_FIELDS: Dict[str, FieldConfig] = {
         extraction_guidelines=[
             "**ANCHOR LABELS**: 'Delivery by date', 'Deliver By', 'Required By', 'Need By Date'",
             "**FORMAT**: Convert to ISO format YYYY-MM-DD",
-            "**NEGATIVE RULE**: NOT PO issue date"
+            "**NEGATIVE RULE**: NOT PO issue date",
+            "**STRICT RULE**: If no explicit delivery-by label exists, return null",
+            "**NO CALCULATION RULE**: Do NOT compute from payment terms (e.g., Net 30)"
         ]
     ),
 
@@ -752,7 +756,9 @@ PO_FIELDS: Dict[str, FieldConfig] = {
         description="Billing party name",
         extraction_guidelines=[
             "**ANCHOR LABELS**: 'Billing Name', 'Bill To', 'Billing Party'",
-            "**FORMAT**: Full name as printed"
+            "**FORMAT**: Full name as printed",
+            "**STRICT RULE**: If no explicit Bill To/Billing label exists, return null",
+            "**NEGATIVE RULE**: Do NOT copy value from Deliver To/Ship To"
         ]
     ),
 
@@ -763,7 +769,9 @@ PO_FIELDS: Dict[str, FieldConfig] = {
         description="Billing address details",
         extraction_guidelines=[
             "**ANCHOR LABELS**: 'Billing Address', 'Bill To Address'",
-            "**CRITICAL**: Extract full multi-line billing address"
+            "**CRITICAL**: Extract full multi-line billing address",
+            "**STRICT RULE**: If only Deliver To/Ship To address is present and no Bill To label exists, return null",
+            "**NEGATIVE RULE**: Do NOT copy Delivery/Ship-To address"
         ]
     ),
 
@@ -774,7 +782,8 @@ PO_FIELDS: Dict[str, FieldConfig] = {
         description="Delivery party or destination name",
         extraction_guidelines=[
             "**ANCHOR LABELS**: 'Delivery Name', 'Deliver To', 'Ship To Name'",
-            "**FORMAT**: Full name as printed"
+            "**FORMAT**: Full name as printed",
+            "**NEGATIVE RULE**: Do NOT copy Bill To name"
         ]
     ),
 
@@ -785,7 +794,8 @@ PO_FIELDS: Dict[str, FieldConfig] = {
         description="Delivery destination address",
         extraction_guidelines=[
             "**ANCHOR LABELS**: 'Delivery Address', 'Ship To Address', 'Deliver To Address'",
-            "**CRITICAL**: Extract full multi-line delivery address"
+            "**CRITICAL**: Extract full multi-line delivery address",
+            "**NEGATIVE RULE**: Do NOT copy Bill To address"
         ]
     ),
 
@@ -833,7 +843,7 @@ PO_FIELDS: Dict[str, FieldConfig] = {
         extraction_guidelines=[
             "**FORMAT**: 3-letter ISO code (USD, EUR, GBP, etc.)",
             "**LOCATION**: Near total amount or in header",
-            "**SYMBOL MAPPING**: $ → USD, € → EUR, £ → GBP"
+            "**SYMBOL MAPPING**: $ â†’ USD, â‚¬ â†’ EUR, Â£ â†’ GBP"
         ]
     ),
 
@@ -911,7 +921,7 @@ PO_ITEM_FIELDS: Dict[str, FieldConfig] = {
         extraction_guidelines=[
             "**COLUMN HEADERS**: 'Unit Price', 'Price', 'Rate'",
             "**FORMAT**: Numeric, remove currency symbols",
-            "**VALIDATION**: quantity × unit_price ≈ total_price"
+            "**VALIDATION**: quantity Ã— unit_price â‰ˆ total_price"
         ]
     ),
 
@@ -923,7 +933,7 @@ PO_ITEM_FIELDS: Dict[str, FieldConfig] = {
         extraction_guidelines=[
             "**COLUMN HEADERS**: 'Total', 'Amount', 'Extended Price'",
             "**FORMAT**: Numeric, remove currency symbols",
-            "**VALIDATION**: Should equal quantity × unit_price"
+            "**VALIDATION**: Should equal quantity Ã— unit_price"
         ]
     ),
 
@@ -1280,7 +1290,7 @@ def generate_field_prompt_section(fields: Dict[str, FieldConfig], section_name: 
         if config.extraction_guidelines:
             lines.append("  - Guidelines:")
             for g in config.extraction_guidelines:
-                lines.append(f"    • {g}")
+                lines.append(f"    â€¢ {g}")
     return "\n".join(lines)
 
 
@@ -1343,26 +1353,26 @@ IMMEDIATELY SKIP pages labeled as:
 SECTION 3: DOCUMENT TYPE CLASSIFICATION
 ================================================================================
 
-┌─────────────────┬──────────────────────────────┬──────────────────────────────────────────┐
-│ BUCKET          │ PRIMARY KEYWORDS             │ STRUCTURAL MARKERS                       │
-├─────────────────┼──────────────────────────────┼──────────────────────────────────────────┤
-│ po              │ "Purchase Order"             │ • Generated by the BUYER                 │
-│                 │ "PO Number"                  │ • Contains "Bill To" AND "Ship To"       │
-│                 │ "Local Purchase Order" (LPO) │ • Signature is "Authorized Buyer"        │
-│                 │ "Order Confirmation"         │ • Lists Payment Terms (Net 30, etc.)     │
-│                 │                              │ • Header company is BUYER (has logo)     │
-├─────────────────┼──────────────────────────────┼──────────────────────────────────────────┤
-│ grn             │ "Goods Received Note"        │ • Focus on QUANTITIES (Ordered vs Recvd) │
-│                 │ "Delivery Note" / "Docket"   │ • Often LACKS unit prices/totals         │
-│                 │ "Packing List" / "Slip"      │ • Contains Warehouse/Invoice data      │
-│                 │ "Receiving Report"           │   (e.g., "Vehicle Reg", "Bin Location")  │
-│                 │ "Material Receipt"           │ • Checkboxes for inspection/QC           │
-├─────────────────┼──────────────────────────────┼──────────────────────────────────────────┤
-│ invoices        │ "Tax Invoice"                │ • Generated by the SELLER                │
-│                 │ "Commercial Invoice"         │ • "Pay to" instructions / Bank Details   │
-│                 │ "Bill" / "Bill of Supply"    │ • Total Amount Due is prominent          │
-│                 │                              │ • Header company is SELLER (has logo)    │
-└─────────────────┴──────────────────────────────┴──────────────────────────────────────────┘
+â”Œâ”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”¬â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”¬â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”
+â”‚ BUCKET          â”‚ PRIMARY KEYWORDS             â”‚ STRUCTURAL MARKERS                       â”‚
+â”œâ”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”¼â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”¼â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”¤
+â”‚ po              â”‚ "Purchase Order"             â”‚ â€¢ Generated by the BUYER                 â”‚
+â”‚                 â”‚ "PO Number"                  â”‚ â€¢ Contains "Bill To" AND "Ship To"       â”‚
+â”‚                 â”‚ "Local Purchase Order" (LPO) â”‚ â€¢ Signature is "Authorized Buyer"        â”‚
+â”‚                 â”‚ "Order Confirmation"         â”‚ â€¢ Lists Payment Terms (Net 30, etc.)     â”‚
+â”‚                 â”‚                              â”‚ â€¢ Header company is BUYER (has logo)     â”‚
+â”œâ”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”¼â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”¼â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”¤
+â”‚ grn             â”‚ "Goods Received Note"        â”‚ â€¢ Focus on QUANTITIES (Ordered vs Recvd) â”‚
+â”‚                 â”‚ "Delivery Note" / "Docket"   â”‚ â€¢ Often LACKS unit prices/totals         â”‚
+â”‚                 â”‚ "Packing List" / "Slip"      â”‚ â€¢ Contains Warehouse/Invoice data      â”‚
+â”‚                 â”‚ "Receiving Report"           â”‚   (e.g., "Vehicle Reg", "Bin Location")  â”‚
+â”‚                 â”‚ "Material Receipt"           â”‚ â€¢ Checkboxes for inspection/QC           â”‚
+â”œâ”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”¼â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”¼â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”¤
+â”‚ invoices        â”‚ "Tax Invoice"                â”‚ â€¢ Generated by the SELLER                â”‚
+â”‚                 â”‚ "Commercial Invoice"         â”‚ â€¢ "Pay to" instructions / Bank Details   â”‚
+â”‚                 â”‚ "Bill" / "Bill of Supply"    â”‚ â€¢ Total Amount Due is prominent          â”‚
+â”‚                 â”‚                              â”‚ â€¢ Header company is SELLER (has logo)    â”‚
+â””â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”´â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”´â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”˜
 
 MATCHING REQUIREMENT: Document must exhibit 2+ structural traits of the category.
 
@@ -1373,16 +1383,16 @@ SECTION 4: CONFLICT RESOLUTION LOGIC
 ### THE "PRICE" TEST (Invoice vs. GRN/Packing List)
 Many GRNs and Packing Lists look like invoices but have no financial value.
 RULE:
-IF document lists items/quantities but NO prices/totals  → CLASSIFY AS GRN
-IF document lists items with prices, tax, and total due  → CLASSIFY AS INVOICE
+IF document lists items/quantities but NO prices/totals  â†’ CLASSIFY AS GRN
+IF document lists items with prices, tax, and total due  â†’ CLASSIFY AS INVOICE
 
 ### THE "DIRECTION" TEST (Invoice vs. PO)
 Both Invoices and POs have prices and totals.
 RULE:
-IF the Sender is demanding payment ("Pay to...")         → CLASSIFY AS INVOICE
-IF the Sender is requesting goods ("Ship to...")         → CLASSIFY AS PO
-IF Header logo is BUYER + "Bill To" is present           → CLASSIFY AS PO
-IF Header logo is SELLER + Bank details present          → CLASSIFY AS INVOICE
+IF the Sender is demanding payment ("Pay to...")         â†’ CLASSIFY AS INVOICE
+IF the Sender is requesting goods ("Ship to...")         â†’ CLASSIFY AS PO
+IF Header logo is BUYER + "Bill To" is present           â†’ CLASSIFY AS PO
+IF Header logo is SELLER + Bank details present          â†’ CLASSIFY AS INVOICE
 
 ================================================================================
 SECTION 5: OUTPUT SPECIFICATION (Strict JSON Only)
@@ -1412,6 +1422,7 @@ INVOICE_PROMPT = generate_extraction_prompt(
         "**ANCHOR LOGIC**: Logo usually denotes Seller. 'To' usually denotes Buyer.",
         "**MATH CHECK**: Total Amount should equal sum of Line Items (approx).",
         "**DATES**: Standardize all dates to YYYY-MM-DD.",
+        "**DATE ANTI-COPY**: Never copy invoice date into due_date, shipping_date, or any PO-related date unless explicitly labeled.",
         "**INDIA GST RULE**: Look specifically for GSTINs (15 chars starting with state code e.g., 27...). If SGST/CGST/IGST are split, extract them individually into their specific fields.",
         "**GST ROLE SPLIT**: Vendor/Seller/Supplier GSTIN -> vendor_gstin. Buyer/Bill To/Consignee GSTIN -> billing_gstin.",
         "**LINE SERIAL RULE**: Extract line_no from Sr No / S.No / Line No / Item No columns when present."
@@ -1426,7 +1437,10 @@ PO_PROMPT = generate_extraction_prompt(
     [
         "**ROLE REVERSAL**: Unlike invoices, the entity in the HEADER/LOGO is the BUYER. The entity in 'To' or 'Vendor' block is the SELLER.",
         "**ADDRESS LOGIC**: Distinctly extract 'Bill To' vs 'Ship To'. If 'Ship To' is missing, fallback to 'Buyer Address' but prioritize specific shipping instructions.",
-        "**DATES**: 'Date' is the Order Date. 'Delivery Date' or 'Required Date' is distinct—extract it at the line item level if specific to items.",
+        "**ADDRESS ANTI-COPY**: If Bill To section is absent, do not populate billing_name/billing_address from Deliver To/Ship To.",
+        "**DATES**: 'Date' is the Order Date. 'Delivery Date' or 'Required Date' is distinctâ€”extract it at the line item level if specific to items.",
+        "**DATE ANTI-COPY**: Never duplicate PO Date into purchase_order_expiry_date or delivery_by_date unless explicitly labeled as such.",
+        "**DATE NO-INFERENCE**: Never compute optional PO dates from payment terms (e.g., Date + Net 30).",
         "**FINANCIALS**: Extract Unit Prices and Totals if present. If tax is listed, ensure Total Amount includes it.",
         "**META**: Look for 'Payment Terms' (e.g., Net 30) and 'Shipping Method' (e.g., Air/Sea)."
     ]
