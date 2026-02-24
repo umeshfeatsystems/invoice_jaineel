@@ -84,12 +84,18 @@ INVOICE_EXTRA_GUARDRAILS = """
   - ship via / shipping method -> shipping_method
   - pan / pan no / permanent account number -> pan_no
   - msme / udyam / udyam aadhaar -> msme_number
+  - vendor/supplier/seller GSTIN -> vendor_gstin
+  - bill-to/buyer/customer/consignee GSTIN -> billing_gstin
+  - line/sr/item number column -> items[*].line_no
 - Optional field anchors:
   - `pan_no`: PAN No, PAN Number, Permanent Account Number
   - `msme_number`: MSME, UDYAM, Udyam Aadhaar
   - `payment_addr`: Payment Address, Remit To, Pay To
   - `vendor_email`: Email, E-mail
   - `shipping_method`: Ship Via, Shipping Method, Mode of Transport
+  - `vendor_gstin`: GSTIN, GST No, Supplier GSTIN, Seller GSTIN
+  - `billing_gstin`: Buyer GSTIN, Customer GSTIN, Bill To GSTIN, Consignee GSTIN
+  - `items[*].line_no`: Sr No, S.No, Line No, Item No
 - Never repeat one token across unrelated fields (GST/VAT/email/bank/HSN/part/line fields).
 - Format checks:
   - vendor_gstin/billing_gstin: 15 alphanumeric chars.
@@ -167,6 +173,10 @@ INVALID_OPTIONAL_LITERALS = {
 }
 
 GSTIN_PATTERN = re.compile(r"^\d{2}[A-Z0-9]{13}$")
+# Some vendor-generated PDFs contain GST-like IDs that are 14 chars instead of 15.
+# Keep strict GSTIN first, but allow 14-char fallback to avoid dropping clearly labeled values.
+GSTIN_RELAXED_PATTERN = re.compile(r"^\d{2}[A-Z0-9]{12,13}$")
+GSTIN_SEARCH_PATTERN = re.compile(r"(?<![A-Z0-9])\d{2}[A-Z0-9]{12,13}(?![A-Z0-9])", re.IGNORECASE)
 EMAIL_PATTERN = re.compile(r"^[A-Z0-9._%+\-]+@[A-Z0-9.\-]+\.[A-Z]{2,}$", re.IGNORECASE)
 HSN_PATTERN = re.compile(r"^\d{4,8}$")
 IBAN_PATTERN = re.compile(r"^[A-Z]{2}\d{2}[A-Z0-9]{11,30}$")
@@ -174,6 +184,7 @@ SWIFT_PATTERN = re.compile(r"^[A-Z]{6}[A-Z0-9]{2}(?:[A-Z0-9]{3})?$")
 ROUTING_PATTERN = re.compile(r"^\d{5,12}$")
 BANK_ACCOUNT_PATTERN = re.compile(r"^[A-Z0-9\-]{4,34}$", re.IGNORECASE)
 PAN_PATTERN = re.compile(r"^[A-Z]{5}[0-9]{4}[A-Z]$")
+LINE_NO_PATTERN = re.compile(r"^\s*(?:sr\.?\s*no\.?|s\.?\s*no\.?|line|item)?\s*[:#\-]?\s*(\d{1,5})\s*[.)\-]?\s*$", re.IGNORECASE)
 
 # ==========================================
 # SCHEMAS
@@ -319,6 +330,58 @@ def _is_zero(value: Optional[float], tol: float = 1e-9) -> bool:
 def _is_integerish(value: Optional[float], tol: float = 1e-6) -> bool:
     return value is not None and abs(float(value) - round(float(value))) <= tol
 
+def _canonicalize_gstin(value: Any) -> Optional[str]:
+    if not isinstance(value, str):
+        return None
+    compact = re.sub(r"[^A-Z0-9]", "", value.upper())
+    if GSTIN_PATTERN.fullmatch(compact):
+        return compact
+    if GSTIN_RELAXED_PATTERN.fullmatch(compact):
+        has_alpha = any(ch.isalpha() for ch in compact)
+        has_digit = any(ch.isdigit() for ch in compact)
+        if has_alpha and has_digit:
+            return compact
+    return None
+
+def _extract_gstin_candidates(value: Any) -> List[str]:
+    if not isinstance(value, str):
+        return []
+    candidates: List[str] = []
+    seen = set()
+    for match in GSTIN_SEARCH_PATTERN.findall(value.upper()):
+        gst = _canonicalize_gstin(match)
+        if gst and gst not in seen:
+            seen.add(gst)
+            candidates.append(gst)
+    return candidates
+
+def _normalize_line_no(value: Any) -> Optional[str]:
+    if value is None:
+        return None
+    if isinstance(value, (int, float)):
+        numeric = _to_float_or_none(value)
+        if numeric is None or numeric <= 0:
+            return None
+        return str(int(numeric)) if _is_integerish(numeric) else str(numeric)
+
+    if not isinstance(value, str):
+        return None
+
+    text = value.strip()
+    if not text or text.lower() in INVALID_OPTIONAL_LITERALS:
+        return None
+
+    match = LINE_NO_PATTERN.match(text)
+    if match:
+        line_no = match.group(1)
+        return line_no if any(ch != "0" for ch in line_no) else None
+
+    if " " in text or len(text) > 10:
+        return None
+
+    compact = re.sub(r"[^A-Za-z0-9._\-\/]", "", text)
+    return compact or None
+
 def _sanitize_invoice_data(raw_data: Dict[str, Any]) -> Dict[str, Any]:
     data = dict(raw_data)
     suspicious_tokens = _collect_suspicious_invoice_tokens(data)
@@ -345,11 +408,48 @@ def _sanitize_invoice_data(raw_data: Dict[str, Any]) -> Dict[str, Any]:
 
     for key in ["vendor_gstin", "billing_gstin"]:
         gst_val = _null_if_suspicious(_clean_optional_text(data.get(key)), suspicious_tokens)
-        if isinstance(gst_val, str):
-            compact = re.sub(r"[\s\-]", "", gst_val).upper()
-            data[key] = compact if GSTIN_PATTERN.fullmatch(compact) else None
-        else:
-            data[key] = None
+        data[key] = _canonicalize_gstin(gst_val)
+
+    # GSTIN recovery pass: recover valid GSTIN tokens from extracted address/name blocks
+    # when the direct vendor_gstin/billing_gstin fields are missed by the model.
+    vendor_sources = [data.get("name"), data.get("vendor_addr"), data.get("payment_addr")]
+    billing_sources = [data.get("billing_name"), data.get("billing_addr"), data.get("shipping_addr")]
+
+    vendor_candidates: List[str] = []
+    billing_candidates: List[str] = []
+    any_candidates: List[str] = []
+    seen_any = set()
+
+    for source in vendor_sources:
+        for gst in _extract_gstin_candidates(source):
+            if gst not in vendor_candidates:
+                vendor_candidates.append(gst)
+            if gst not in seen_any:
+                seen_any.add(gst)
+                any_candidates.append(gst)
+
+    for source in billing_sources:
+        for gst in _extract_gstin_candidates(source):
+            if gst not in billing_candidates:
+                billing_candidates.append(gst)
+            if gst not in seen_any:
+                seen_any.add(gst)
+                any_candidates.append(gst)
+
+    if data.get("vendor_gstin") is None and vendor_candidates:
+        data["vendor_gstin"] = vendor_candidates[0]
+
+    if data.get("billing_gstin") is None and billing_candidates:
+        preferred = next((gst for gst in billing_candidates if gst != data.get("vendor_gstin")), None)
+        data["billing_gstin"] = preferred or billing_candidates[0]
+
+    if data.get("vendor_gstin") is None and len(any_candidates) == 1:
+        data["vendor_gstin"] = any_candidates[0]
+
+    if data.get("billing_gstin") is None:
+        fallback = next((gst for gst in any_candidates if gst != data.get("vendor_gstin")), None)
+        if fallback:
+            data["billing_gstin"] = fallback
 
     pan_no = _null_if_suspicious(_clean_optional_text(data.get("pan_no")), suspicious_tokens)
     if isinstance(pan_no, str):
@@ -492,11 +592,7 @@ def _sanitize_invoice_data(raw_data: Dict[str, Any]) -> Dict[str, Any]:
             for key in ["line_no", "item_po_no", "part_no", "hsn_code"]:
                 item_data[key] = _null_if_suspicious(_clean_optional_text(item_data.get(key)), suspicious_tokens)
 
-            line_no = item_data.get("line_no")
-            if isinstance(line_no, str):
-                trimmed = line_no.strip()
-                if " " in trimmed or len(trimmed) > 10:
-                    item_data["line_no"] = None
+            item_data["line_no"] = _normalize_line_no(item_data.get("line_no"))
 
             hsn_code = item_data.get("hsn_code")
             if isinstance(hsn_code, str):
@@ -504,6 +600,32 @@ def _sanitize_invoice_data(raw_data: Dict[str, Any]) -> Dict[str, Any]:
                 item_data["hsn_code"] = compact if HSN_PATTERN.fullmatch(compact) else None
 
             cleaned_items.append(item_data)
+
+        # Make line numbers robust: if missing or obviously placeholder-only (e.g. all '1'),
+        # fill by row sequence so each line item has a stable serial value.
+        numeric_line_nos = [
+            item["line_no"]
+            for item in cleaned_items
+            if isinstance(item.get("line_no"), str) and re.fullmatch(r"\d{1,5}", item["line_no"])
+        ]
+        resequence_all = (
+            len(cleaned_items) > 1
+            and numeric_line_nos
+            and len(set(numeric_line_nos)) == 1
+            and numeric_line_nos[0] == "1"
+        )
+
+        seen_line_nos = set()
+        for idx, item in enumerate(cleaned_items, start=1):
+            current = item.get("line_no")
+            if (
+                resequence_all
+                or not isinstance(current, str)
+                or not current.strip()
+                or current in seen_line_nos
+            ):
+                item["line_no"] = str(idx)
+            seen_line_nos.add(item["line_no"])
         data["items"] = cleaned_items
 
     return data
@@ -813,6 +935,10 @@ class Invoice(BaseModel):
     bank_details: Optional[BankDetails] = Field(None, description="Vendor Bank Details")
     items: List[InvoiceItem] = Field(default_factory=list, description="Invoice Line Items")
 
+class InvoiceGSTFallback(BaseModel):
+    vendor_gstin: Optional[str] = Field(None, description="Vendor/Seller GSTIN")
+    billing_gstin: Optional[str] = Field(None, description="Buyer/Bill-To GSTIN")
+
 # --- PO & GRN MODELS ---
 class POItem(BaseModel):
     line_number: Optional[float] = None
@@ -862,6 +988,44 @@ class GoodsReceivedNote(BaseModel):
     total_amount: Optional[float] = Field(None, description="Total Amount")
     tax_amount: Optional[float] = Field(None, description="Tax Amount")
     items: List[GRNItem] = Field(default_factory=list)
+
+async def _extract_invoice_gstin_fallback(
+    gemini_file,
+    page_range: List[int],
+    timeout: int,
+) -> tuple[Dict[str, Optional[str]], Optional[Dict[str, int]]]:
+    gst_prompt = (
+        "You are extracting GSTIN fields from an Indian invoice.\n"
+        "Extract ONLY these JSON keys: vendor_gstin, billing_gstin.\n\n"
+        "Mapping rules:\n"
+        "- vendor_gstin: GSTIN under BILL FROM / Vendor / Supplier / Seller block.\n"
+        "- billing_gstin: GSTIN under BILL TO / Buyer / Customer / Consignee block.\n"
+        "- GSTIN format is 15 alphanumeric characters and starts with 2-digit state code.\n"
+        "- If not explicitly visible, return null.\n"
+        "- Do not swap seller and buyer GSTIN.\n\n"
+        f"IMPORTANT: Read ONLY pages {page_range[0]} to {page_range[1]}."
+    )
+
+    model = genai.GenerativeModel(CONFIG["EXTRACTOR_MODEL"])
+    config = get_generation_config(response_schema=InvoiceGSTFallback)
+    response = await model.generate_content_async(
+        [gst_prompt, gemini_file],
+        generation_config=config,
+        request_options={"timeout": min(timeout, 300)},
+    )
+
+    usage = None
+    if response.usage_metadata:
+        usage = {
+            "prompt_token_count": response.usage_metadata.prompt_token_count,
+            "candidates_token_count": response.usage_metadata.candidates_token_count,
+        }
+
+    payload = InvoiceGSTFallback.model_validate_json(response.text).model_dump()
+    return {
+        "vendor_gstin": _canonicalize_gstin(payload.get("vendor_gstin")),
+        "billing_gstin": _canonicalize_gstin(payload.get("billing_gstin")),
+    }, usage
 
 # ==========================================
 # CLASSIFICATION SERVICE
@@ -938,6 +1102,24 @@ async def extract_document_chunk(gemini_file, doc_type: str, page_range: List[in
         data_payload = data_obj.model_dump()
         if doc_type == "invoice":
             data_payload = _sanitize_invoice_data(data_payload)
+
+            # Dedicated second-pass GST extraction when first-pass invoice extraction misses GSTINs.
+            if data_payload.get("vendor_gstin") is None or data_payload.get("billing_gstin") is None:
+                try:
+                    gst_fallback, gst_usage = await _extract_invoice_gstin_fallback(gemini_file, page_range, timeout)
+                    if data_payload.get("vendor_gstin") is None and gst_fallback.get("vendor_gstin"):
+                        data_payload["vendor_gstin"] = gst_fallback["vendor_gstin"]
+                    if data_payload.get("billing_gstin") is None and gst_fallback.get("billing_gstin"):
+                        data_payload["billing_gstin"] = gst_fallback["billing_gstin"]
+
+                    if gst_usage:
+                        if usage is None:
+                            usage = {"prompt_token_count": 0, "candidates_token_count": 0}
+                        usage["prompt_token_count"] += gst_usage.get("prompt_token_count", 0)
+                        usage["candidates_token_count"] += gst_usage.get("candidates_token_count", 0)
+                except Exception as gst_err:
+                    logger.warning(f"GST fallback extraction failed for pages {page_range}: {gst_err}")
+
             data_obj = Invoice.model_validate(data_payload)
         elif doc_type == "po":
             data_payload = _sanitize_po_data(data_payload)

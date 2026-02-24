@@ -243,10 +243,11 @@ INVOICE_FIELDS: Dict[str, FieldConfig] = {
         field_type=FieldType.STRING,
         description="GST Identification Number of the Supplier",
         extraction_guidelines=[
-            "**ANCHOR LABELS**: 'GSTIN', 'GST No.', 'Vendor GST', 'GST#', 'GST Registration No'",
+            "**ANCHOR LABELS**: 'GSTIN', 'GST No.', 'Vendor GST', 'Supplier GSTIN', 'Seller GSTIN', 'GST Registration No'",
             "**FORMAT**: 15 alphanumeric characters (e.g., 27AAAAA0000A1Z5)",
-            "**LOCATION**: Header or under Seller details",
-            "**VALIDATION**: Starts with 2-digit state code"
+            "**LOCATION**: Header or under Seller/Supplier details, especially BILL FROM block",
+            "**VALIDATION**: Starts with 2-digit state code",
+            "**ROLE RULE**: This is the GSTIN of the seller/vendor side only"
         ]
     ),
 
@@ -256,9 +257,10 @@ INVOICE_FIELDS: Dict[str, FieldConfig] = {
         field_type=FieldType.STRING,
         description="GST Identification Number of the Buyer",
         extraction_guidelines=[
-            "**ANCHOR LABELS**: 'Customer GST', 'Buyer GSTIN', 'GST No.', 'GSTIN'",
-            "**LOCATION**: 'Bill To' section or under Buyer details",
-            "**FORMAT**: 15 alphanumeric characters"
+            "**ANCHOR LABELS**: 'Customer GST', 'Buyer GSTIN', 'Bill To GSTIN', 'Consignee GSTIN', 'GST No.', 'GSTIN'",
+            "**LOCATION**: 'Bill To' section or under Buyer details, especially BILL TO block",
+            "**FORMAT**: 15 alphanumeric characters",
+            "**ROLE RULE**: This is the GSTIN of the buyer/billing side only"
         ]
     ),
     
@@ -392,16 +394,15 @@ INVOICE_FIELDS: Dict[str, FieldConfig] = {
 
 
 INVOICE_ITEM_FIELDS: Dict[str, FieldConfig] = {
-    "item_no": FieldConfig(
-        name="item_no",
-        display_name="Item/Serial Number",
+    "line_no": FieldConfig(
+        name="line_no",
+        display_name="Line Number",
         field_type=FieldType.STRING,
-        description="Line item sequence number",
+        description="Line item sequence/serial number",
         extraction_guidelines=[
-            "**HARDCODED RULE**: IGNORE the specific values in the column (e.g. '000027').",
-            "**HARDCODED RULE**: IGNORE the row position (do not count 1, 2, 3...).",
-            "**ACTION**: For EVERY single line item row, output the value '1'.",
-            "**RESULT**: If there are 5 items, the output should be '1', '1', '1', '1', '1'.",
+            "**COLUMN HEADERS**: 'Sr No', 'S.No', 'Serial', 'Line No', 'Item No'",
+            "**FORMAT**: Preserve row serial exactly if explicitly present",
+            "**FALLBACK**: If no explicit serial column exists, return null"
         ]
     ),
 
@@ -1301,7 +1302,7 @@ def generate_extraction_prompt(doc_type, fields, item_fields, custom_instruction
         parts.append(generate_field_prompt_section(item_fields, "LINE ITEM FIELDS", exclude_fields))
         parts.append("\n### LINE ITEMS INSTRUCTIONS:")
         parts.append("- Extract ALL line items from the table")
-        parts.append("- **item_no**: HARDCODED RULE: ALWAYS set to '1'")
+        parts.append("- Map each value to the correct line-item column only; do not swap columns.")
 
     parts.append("\n### OUTPUT:")
     parts.append("Return valid JSON strictly matching the provided schema. Use null for missing fields.")
@@ -1411,7 +1412,9 @@ INVOICE_PROMPT = generate_extraction_prompt(
         "**ANCHOR LOGIC**: Logo usually denotes Seller. 'To' usually denotes Buyer.",
         "**MATH CHECK**: Total Amount should equal sum of Line Items (approx).",
         "**DATES**: Standardize all dates to YYYY-MM-DD.",
-        "**INDIA GST RULE**: Look specifically for GSTINs (15 chars starting with state code e.g., 27...). If SGST/CGST/IGST are split, extract them individually into their specific fields."
+        "**INDIA GST RULE**: Look specifically for GSTINs (15 chars starting with state code e.g., 27...). If SGST/CGST/IGST are split, extract them individually into their specific fields.",
+        "**GST ROLE SPLIT**: Vendor/Seller/Supplier GSTIN -> vendor_gstin. Buyer/Bill To/Consignee GSTIN -> billing_gstin.",
+        "**LINE SERIAL RULE**: Extract line_no from Sr No / S.No / Line No / Item No columns when present."
     ],
     exclude_fields=["invoice_toi", "invoice_po_date"] # Excluded from main pass if doing 2-pass extraction
 )
