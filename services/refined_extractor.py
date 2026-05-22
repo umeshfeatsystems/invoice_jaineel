@@ -1,13 +1,18 @@
 import logging
 import asyncio
 import json
-import google.generativeai as genai
+from google import genai
+from google.genai import types
 from google.api_core.exceptions import DeadlineExceeded, ServiceUnavailable, InternalServerError
 from services.rate_limiter import get_rate_limiter, release_rate_limit
 from services.prompt_config import OCR_LOGIC_PROMPT
+from models.gemini_config import get_http_options
 from pypdf import PdfReader
 
 logger = logging.getLogger("Invoice_refined")
+
+# Create a global client instance
+client = genai.Client()
 
 def get_page_count(pdf_path: str) -> int:
     """Reads PDF page count efficiently."""
@@ -35,14 +40,18 @@ async def get_raw_text_from_pdf(pdf_path: str, model_name: str = "gemini-2.5-fla
         try:
             await get_rate_limiter().acquire(model_name)
             
-            pdf_file = genai.upload_file(pdf_path, mime_type="application/pdf")
-            model = genai.GenerativeModel(model_name)
+            pdf_file = client.files.upload(file=pdf_path, config={"mime_type": "application/pdf"})
             
             prompt = "Transcribe ALL text from this document exactly as it appears. Maintain spatial layout where possible. Return ONLY the raw text."
             
-            response = await model.generate_content_async(
-                [prompt, pdf_file],
-                request_options={"timeout": timeout}
+            config = types.GenerateContentConfig(
+                http_options=get_http_options(timeout)
+            )
+            
+            response = await client.aio.models.generate_content(
+                model=model_name,
+                contents=[prompt, pdf_file],
+                config=config
             )
             return response.text
             
@@ -72,15 +81,16 @@ async def extract_header_from_text(raw_text: str, model_name: str = "gemini-2.5-
     try:
         await get_rate_limiter().acquire(model_name)
         
-        model = genai.GenerativeModel(model_name)
-        
         # We expect JSON output
-        config = genai.GenerationConfig(response_mime_type="application/json")
+        config = types.GenerateContentConfig(
+            response_mime_type="application/json",
+            http_options=get_http_options(30)
+        )
         
-        response = await model.generate_content_async(
-            [OCR_LOGIC_PROMPT, raw_text],
-            generation_config=config,
-            request_options={"timeout": 30}
+        response = await client.aio.models.generate_content(
+            model=model_name,
+            contents=[OCR_LOGIC_PROMPT, raw_text],
+            config=config
         )
         
         return json.loads(response.text)

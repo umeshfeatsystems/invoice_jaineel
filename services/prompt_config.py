@@ -1,4 +1,4 @@
-﻿"""
+"""
 Standardized JSON-based Prompt Configuration System
 ====================================================
 Scope: Commercial Invoices, Purchase Orders (PO), and Goods Received Notes (GRN).
@@ -17,6 +17,7 @@ class FieldType(str, Enum):
     DATE = "date"
     CURRENCY = "currency"
     LIST = "list"
+    BOOLEAN = "boolean"
 
 
 @dataclass
@@ -368,6 +369,18 @@ INVOICE_FIELDS: Dict[str, FieldConfig] = {
             "**NEGATIVE RULE**: Do NOT confuse with unit price or discount rate",
             "**DEFAULT**: Return null if no exchange rate mentioned (single currency invoice)"
         ]
+    ),
+
+    "has_stock_received_stamp": FieldConfig(
+        name="has_stock_received_stamp",
+        display_name="Stock Received Stamp Present",
+        field_type=FieldType.BOOLEAN,
+        description="Indicates if a 'Stock Received' stamp is visible on the invoice",
+        extraction_guidelines=[
+            "**TARGET**: Look for a stamp, seal, or written text stating 'Stock Received'",
+            "**FORMAT**: Return true if found, otherwise false",
+        ],
+        default=False
     ),
 
     "invoice_po_date": FieldConfig(

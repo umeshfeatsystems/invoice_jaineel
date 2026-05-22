@@ -63,6 +63,7 @@ class Invoice(BaseModel):
     # Terms
     invoice_toi: Optional[str] = Field(None, description="Terms of Invoice (IncoTerms)")
     invoice_po_date: Optional[str] = None
+    has_stock_received_stamp: Optional[bool] = Field(False, description="True if a 'Stock Received' stamp is present on the invoice")
     
     # Line items
     items: List[InvoiceItem] = Field(default_factory=list)

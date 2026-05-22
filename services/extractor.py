@@ -11,13 +11,14 @@ Engineered for Gemini 3.0 Pro with DYNAMIC TIMEOUTS.
 import time
 import io
 import logging
-import google.generativeai as genai
+from google import genai
+from google.genai import types
 from typing import Tuple, Optional, Dict, Any
 from google.api_core.exceptions import DeadlineExceeded, ServiceUnavailable, InternalServerError, ResourceExhausted
 from pypdf import PdfReader
 
 from models.schemas import Invoice, AirwayBill
-from models.gemini_config import get_generation_config
+from models.gemini_config import get_generation_config, get_http_options
 from services.prompt_config import INVOICE_PROMPT, AWB_PROMPT
 
 logger = logging.getLogger("Invoice_extractor")
@@ -68,10 +69,10 @@ def execute_with_adaptable_retry(func, operation_name: str, pages: int):
             time.sleep(delay)
             delay *= 2  # Exponential backoff
         except Exception as e:
-            print(f"❌ {operation_name} Critical Error: {e}")
+            print(f"{operation_name} Critical Error: {e}")
             raise e
             
-    print(f"❌ {operation_name}: Failed after {MAX_RETRIES} attempts.")
+    print(f"{operation_name}: Failed after {MAX_RETRIES} attempts.")
     raise last_exception
 
 # =============================================================================
@@ -139,16 +140,17 @@ async def extract_invoice(pdf_path: str, model_name: str) -> Tuple[Invoice, Opti
     """Extract invoice data with dynamic timeout."""
     try:
         pages = get_page_count(pdf_path)
-        pdf_file = genai.upload_file(pdf_path, mime_type="application/pdf")
-        model = genai.GenerativeModel(model_name)
+        client = genai.Client()
+        pdf_file = client.files.upload(file=pdf_path, config={"mime_type": "application/pdf"})
         config = get_generation_config(response_schema=Invoice)
         
         # Function accepts 'timeout' arg to be passed by the retry wrapper
         def _api_call(timeout):
-            return model.generate_content(
-                [INVOICE_PROMPT, pdf_file], 
-                generation_config=config, 
-                request_options={"timeout": timeout} 
+            config.http_options = get_http_options(timeout)
+            return client.models.generate_content(
+                model=model_name,
+                contents=[INVOICE_PROMPT, pdf_file], 
+                config=config 
             )
             
         response = execute_with_adaptable_retry(_api_call, "Invoice Extraction", pages)
@@ -164,7 +166,7 @@ async def extract_invoice(pdf_path: str, model_name: str) -> Tuple[Invoice, Opti
         return Invoice.model_validate(processed_data), usage
 
     except Exception as e:
-        print(f"❌ Invoice Extraction Failed: {e}")
+        print(f"Invoice Extraction Failed: {e}")
         return Invoice(), None
 
 
@@ -172,15 +174,16 @@ async def extract_airway_bill(pdf_path: str, model_name: str) -> Tuple[AirwayBil
     """Extract AWB data with dynamic timeout."""
     try:
         pages = get_page_count(pdf_path)
-        pdf_file = genai.upload_file(pdf_path, mime_type="application/pdf")
-        model = genai.GenerativeModel(model_name)
+        client = genai.Client()
+        pdf_file = client.files.upload(file=pdf_path, config={"mime_type": "application/pdf"})
         config = get_generation_config(response_schema=AirwayBill)
         
         def _api_call(timeout):
-            return model.generate_content(
-                [AWB_PROMPT, pdf_file], 
-                generation_config=config, 
-                request_options={"timeout": timeout} 
+            config.http_options = get_http_options(timeout)
+            return client.models.generate_content(
+                model=model_name,
+                contents=[AWB_PROMPT, pdf_file], 
+                config=config 
             )
 
         response = execute_with_adaptable_retry(_api_call, "AWB Extraction", pages)
@@ -196,5 +199,5 @@ async def extract_airway_bill(pdf_path: str, model_name: str) -> Tuple[AirwayBil
         return AirwayBill.model_validate(processed_data), usage
 
     except Exception as e:
-        print(f"❌ AWB Extraction Failed: {e}")
+        print(f"AWB Extraction Failed: {e}")
         return AirwayBill(), None

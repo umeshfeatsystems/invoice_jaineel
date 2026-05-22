@@ -1,13 +1,16 @@
 import os
-import google.generativeai as genai
+from google import genai
+from google.genai import types
 from dotenv import load_dotenv
 from pydantic import BaseModel
 
 load_dotenv()
 
 API_KEY = os.getenv("GEMINI_API_KEY")
-if API_KEY:
-    genai.configure(api_key=API_KEY)
+
+# Create a globally accessible client instance.
+# It will use API_KEY or default to the environment variable if None.
+client = genai.Client(api_key=API_KEY) if API_KEY else genai.Client()
 
 def resolve_refs(schema, defs=None):
     """Recursively resolve $ref in schema using definitions."""
@@ -68,14 +71,14 @@ def get_generation_config(response_schema=None, enable_low_latency_thinking: boo
         response_schema: The Pydantic model for JSON output.
         enable_low_latency_thinking: If True, configures Gemini 3.0 for minimal reasoning latency.
     """
-    config = {
+    config_kwargs = {
         "response_mime_type": "application/json",
         "temperature": 0.0,
     }
     
     # --- GEMINI 3.0 PRO SPECIFIC CONFIGURATION ---
     if enable_low_latency_thinking:
-        config["thinking_config"] = {
+        config_kwargs["thinking_config"] = {
             "include_thoughts": False,  # Suppress thought tokens in output to prevent JSON parsing errors
             "thinking_level": "LOW"     # "LOW" minimizes latency for high-throughput tasks
         }
@@ -84,14 +87,18 @@ def get_generation_config(response_schema=None, enable_low_latency_thinking: boo
         try:
             if isinstance(response_schema, type) and issubclass(response_schema, BaseModel):
                 raw_schema = response_schema.model_json_schema()
-                config["response_schema"] = clean_schema(raw_schema)
+                config_kwargs["response_schema"] = clean_schema(raw_schema)
             else:
-                config["response_schema"] = response_schema
+                config_kwargs["response_schema"] = response_schema
         except Exception as e:
             print(f"Schema cleaning failed: {e}")
-            config["response_schema"] = response_schema
+            config_kwargs["response_schema"] = response_schema
             
-    return config
+    return types.GenerateContentConfig(**config_kwargs)
+
+def get_http_options(timeout_seconds: int) -> types.HttpOptions:
+    timeout_seconds = max(int(timeout_seconds), 10)
+    return types.HttpOptions(timeout=timeout_seconds * 1000)
 
 # Verified Model Configuration
 CONFIG = {

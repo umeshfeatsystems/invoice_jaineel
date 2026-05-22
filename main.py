@@ -14,11 +14,13 @@ import aiofiles
 import shutil
 import re
 import math
+import copy
 from typing import List, Optional, Dict, Any
 from datetime import datetime, timedelta
 
 import uvicorn
-import google.generativeai as genai
+from google import genai
+from google.genai import types
 from fastapi import FastAPI, UploadFile, File, HTTPException, Form
 from fastapi.responses import JSONResponse
 from fastapi.middleware.cors import CORSMiddleware
@@ -43,8 +45,7 @@ logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(levelname)s - %(
 logger = logging.getLogger("SplitAPI")
 
 API_KEY = os.getenv("GEMINI_API_KEY")
-if API_KEY:
-    genai.configure(api_key=API_KEY)
+client = genai.Client(api_key=API_KEY) if API_KEY else genai.Client()
 
 CONFIG = {
     "CLASSIFIER_MODEL": "gemini-2.5-flash",
@@ -247,6 +248,10 @@ def calculate_timeout_for_pages(num_pages: int) -> int:
     per_page = CONFIG["TIMEOUT_PER_PAGE"]
     max_timeout = CONFIG["MAX_TIMEOUT_SECONDS"]
     return min(base + (num_pages * per_page), max_timeout)
+
+def gemini_http_options(timeout_seconds: int) -> types.HttpOptions:
+    timeout_seconds = max(int(timeout_seconds), 10)
+    return types.HttpOptions(timeout=timeout_seconds * 1000)
 
 def _clean_optional_text(value: Any) -> Optional[str]:
     if value is None or not isinstance(value, str):
@@ -985,17 +990,17 @@ def clean_schema(schema):
     return _clean(schema)
 
 def get_generation_config(response_schema=None):
-    config = {"response_mime_type": "application/json", "temperature": 0.0}
+    config_kwargs = {"response_mime_type": "application/json", "temperature": 0.0}
     if response_schema:
         try:
             if isinstance(response_schema, type) and issubclass(response_schema, BaseModel):
                 raw_schema = response_schema.model_json_schema()
-                config["response_schema"] = clean_schema(raw_schema)
+                config_kwargs["response_schema"] = clean_schema(raw_schema)
             else:
-                config["response_schema"] = response_schema
+                config_kwargs["response_schema"] = response_schema
         except:
-            config["response_schema"] = response_schema
-    return config
+            config_kwargs["response_schema"] = response_schema
+    return types.GenerateContentConfig(**config_kwargs)
 
 # ==========================================
 # 3. PYDANTIC SCHEMAS (From Original main.py)
@@ -1039,6 +1044,7 @@ class Invoice(BaseModel):
     shipping_date: Optional[str] = Field(None, description="Shipping Date (YYYY-MM-DD)")
     payment_terms: Optional[str] = Field(None, description="Payment Terms")
     payment_addr: Optional[str] = Field(None, description="Payment Address")
+    has_stock_received_stamp: Optional[bool] = Field(False, description="True if a 'Stock Received' stamp is present on the invoice")
     tax: Optional[float] = Field(None, description="Tax Amount")
     tax_rate: Optional[float] = Field(None, description="Tax Rate")
     sgst_percentage: Optional[float] = Field(None, description="SGST Rate %")
@@ -1128,12 +1134,13 @@ async def _extract_invoice_gstin_fallback(
         f"IMPORTANT: Read ONLY pages {page_range[0]} to {page_range[1]}."
     )
 
-    model = genai.GenerativeModel(CONFIG["EXTRACTOR_MODEL"])
     config = get_generation_config(response_schema=InvoiceGSTFallback)
-    response = await model.generate_content_async(
-        [gst_prompt, gemini_file],
-        generation_config=config,
-        request_options={"timeout": min(timeout, 300)},
+    config = copy.copy(config)
+    config.http_options = gemini_http_options(min(timeout, 300))
+    response = await client.aio.models.generate_content(
+        model=CONFIG["EXTRACTOR_MODEL"],
+        contents=[gst_prompt, gemini_file],
+        config=config,
     )
 
     usage = None
@@ -1153,15 +1160,16 @@ async def _extract_invoice_gstin_fallback(
 # CLASSIFICATION SERVICE
 # ==========================================
 async def classify_document(gemini_file, total_pages: int) -> DocumentClassification:
-    model = genai.GenerativeModel(CONFIG["CLASSIFIER_MODEL"])
     config = get_generation_config(response_schema=DocumentClassification)
+    config = copy.copy(config)
+    config.http_options = gemini_http_options(CONFIG["CLASSIFICATION_TIMEOUT"])
     
     try:
         await get_rate_limiter().acquire(CONFIG["CLASSIFIER_MODEL"])
-        response = await model.generate_content_async(
-            [CLASSIFICATION_PROMPT, gemini_file],
-            generation_config=config,
-            request_options={"timeout": CONFIG["CLASSIFICATION_TIMEOUT"]}
+        response = await client.aio.models.generate_content(
+            model=CONFIG["CLASSIFIER_MODEL"],
+            contents=[CLASSIFICATION_PROMPT, gemini_file],
+            config=config
         )
         result = DocumentClassification.model_validate_json(response.text)
         
@@ -1204,13 +1212,14 @@ async def extract_document_chunk(gemini_file, doc_type: str, page_range: List[in
     try:
         await get_rate_limiter().acquire(CONFIG["EXTRACTOR_MODEL"])
         
-        model = genai.GenerativeModel(CONFIG["EXTRACTOR_MODEL"])
         config = get_generation_config(response_schema=schema)
+        config = copy.copy(config)
+        config.http_options = gemini_http_options(timeout)
         
-        response = await model.generate_content_async(
-            [full_prompt, gemini_file],
-            generation_config=config,
-            request_options={"timeout": timeout}
+        response = await client.aio.models.generate_content(
+            model=CONFIG["EXTRACTOR_MODEL"],
+            contents=[full_prompt, gemini_file],
+            config=config
         )
         
         usage = None
@@ -1274,7 +1283,14 @@ async def extract_document_chunk(gemini_file, doc_type: str, page_range: List[in
 # ==========================================
 # FASTAPI APP
 # ==========================================
-app = FastAPI(title="Invoice Extraction API (Split)", version="1.0")
+app = FastAPI(
+    title="Invoice Extraction API (Split)",
+    version="1.0",
+    servers=[
+        {"url": "http://122.170.2.205:7011", "description": "Production Nginx server"},
+        {"url": "http://127.0.0.1:7012", "description": "Local development server"}
+    ]
+)
 
 app.add_middleware(
     CORSMiddleware,
@@ -1318,7 +1334,7 @@ async def classify_endpoint(file: UploadFile = File(...)):
             await f.write(content)
         
         # Upload to Gemini (stored for 48h)
-        gemini_file = genai.upload_file(temp_path, mime_type="application/pdf")
+        gemini_file = client.files.upload(file=temp_path, config={"mime_type": "application/pdf"})
         
         # Classify
         classification = await classify_document(gemini_file, total_pages)
@@ -1371,7 +1387,7 @@ async def extract_endpoint(request: ExtractionRequest):
     
     try:
         # Get file from Gemini using file name
-        gemini_file = genai.get_file(request.gemini_file_name)
+        gemini_file = client.files.get(name=request.gemini_file_name)
         
         # Use classification passed from frontend
         classification = request.classification
@@ -1401,9 +1417,16 @@ async def extract_endpoint(request: ExtractionRequest):
         results = await asyncio.gather(*tasks)
         
         total_cost = sum(r.cost_usd for r in results)
+        failed_count = sum(1 for r in results if r.error)
+        if failed_count == len(results):
+            status = "failed"
+        elif failed_count:
+            status = "partial_success"
+        else:
+            status = "success"
         
         return ExtractionResponse(
-            status="success",
+            status=status,
             processing_time_seconds=time.time() - start,
             total_cost_usd=round(total_cost, 6),
             results=results

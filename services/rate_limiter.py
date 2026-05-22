@@ -77,7 +77,7 @@ class SlidingWindowRateLimiter:
         self.total_wait_time: Dict[str, float] = {model: 0.0 for model in model_limits.keys()}
         self.start_time = time.time()
         
-        logger.info(f"🛡️ Rate Limiter initialized:")
+        logger.info(f"Rate Limiter initialized:")
         for model, limit in self.effective_limits.items():
             logger.info(f"   {model}: {limit} RPM (from {model_limits[model]} with {safety_margin*100:.0f}% safety)")
     
@@ -132,7 +132,7 @@ class SlidingWindowRateLimiter:
             model_name: Name of the model being called
         """
         if model_name not in self.model_limits:
-            logger.warning(f"⚠️ Model {model_name} not in rate limiter config. Add it to prevent rate limits!")
+            logger.warning(f"Model {model_name} not in rate limiter config. Add it to prevent rate limits!")
             # Still apply a basic delay for safety
             await asyncio.sleep(0.5)
             return
@@ -151,7 +151,7 @@ class SlidingWindowRateLimiter:
                 
                 if total_wait > max_wait_time:
                     logger.warning(
-                        f"⚠️ {model_name}: Waited {total_wait:.1f}s - proceeding anyway to avoid deadlock"
+                        f"{model_name}: Waited {total_wait:.1f}s - proceeding anyway to avoid deadlock"
                     )
                     break
                 
@@ -171,7 +171,7 @@ class SlidingWindowRateLimiter:
             
             if total_wait > 1.0:
                 logger.info(
-                    f"🛡️ {model_name}: Rate limited for {total_wait:.1f}s "
+                    f"{model_name}: Rate limited for {total_wait:.1f}s "
                     f"(window: {self._get_requests_in_window(model_name)}/{self.effective_limits[model_name]})"
                 )
     
@@ -251,7 +251,7 @@ def initialize_rate_limiter(
         min_request_gap_ms,
         max_concurrent_per_model
     )
-    logger.info("✅ Rate limiter initialized successfully")
+    logger.info("Rate limiter initialized successfully")
 
 
 def get_rate_limiter() -> SlidingWindowRateLimiter:

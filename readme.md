@@ -4,7 +4,7 @@ A high-performance, asynchronous REST API for the automated classification and d
 
 ---
 
-## 🏗️ System Architecture
+## System Architecture
 
 - **Phase 1: Classification (`/api/v1/classify`)** — Uploads the PDF to Google Gemini File Storage, identifies document boundaries, and maps page ranges to specific document types (Invoices, POs, GRNs) using `gemini-2.5-flash`.
 - **Phase 2: Extraction (`/api/v1/extract`)** — Processes specific page chunks concurrently using heavy-duty models (`gemini-3-pro-preview` / `gemini-2.5-pro`). Implements complex structured Pydantic schemas, Python-based post-processing, and fallback GSTIN extraction.
@@ -19,7 +19,7 @@ A high-performance, asynchronous REST API for the automated classification and d
 
 ---
 
-## ⚙️ Installation & Setup
+## Installation & Setup
 
 **1. Clone the repository and navigate to the directory:**
 ```bash
@@ -53,7 +53,7 @@ LOG_LEVEL=INFO
 
 ---
 
-## 🚀 Running the Application
+## Running the Application
 
 ### Development Mode (Standard)
 
@@ -84,6 +84,33 @@ pm2 status                  # View running processes
 pm2 logs invoice-grn-api    # View real-time application logs
 pm2 save                    # Save process list to start on server boot
 pm2 restart invoice-grn-api # Restart the service
+```
+
+### Nginx Deployment on Port 7011
+
+This project is configured so nginx listens publicly on `7011` and proxies to Uvicorn on `127.0.0.1:7012`.
+
+**1. Install and start the API service:**
+```bash
+sudo cp deploy/invoice-grn-api.service /etc/systemd/system/invoice-grn-api.service
+sudo systemctl daemon-reload
+sudo systemctl enable --now invoice-grn-api
+sudo systemctl status invoice-grn-api
+```
+
+**2. Install and enable the nginx site:**
+```bash
+sudo cp nginx/invoice_jaineel.conf /etc/nginx/sites-available/invoice_jaineel.conf
+sudo ln -sf /etc/nginx/sites-available/invoice_jaineel.conf /etc/nginx/sites-enabled/invoice_jaineel.conf
+sudo nginx -t
+sudo systemctl reload nginx
+```
+
+The API will be available at:
+```text
+http://122.170.2.205:7011/docs
+http://122.170.2.205:7011/api/v1/classify
+http://122.170.2.205:7011/api/v1/extract
 ```
 
 ---
@@ -117,7 +144,7 @@ pm2 restart invoice-grn-api # Restart the service
 **Response:** Returns an array of `ExtractionResult` objects containing heavily sanitized, strongly-typed JSON data matching the Pydantic schemas defined in `models/schemas.py`.
 
 
-## 🛠️ Included Utilities
+## Included Utilities
 
 - **Dataset Generation (`docgen.py`):** Merges individual PDFs from `inv-grn-po`, `inv-grn`, and `inv-po` subfolders to create multi-document test packets.
 - **Noise Simulation (`dgen.py`):** Converts clean PDFs into images, applies realistic scanner artifacts (salt & pepper noise, Gaussian blur, skew, contrast manipulation), and converts them back to PDFs to stress-test the OCR capabilities.

@@ -4,9 +4,9 @@ Document Classifier Service
 Updated for 5-Way Specific Vendor Routing.
 """
 
-import google.generativeai as genai
+from google import genai
 from models.schemas import DocumentClassification
-from models.gemini_config import get_generation_config
+from models.gemini_config import get_generation_config, client
 from utils.pdf_utils import get_pdf_page_count
 from services.prompt_config import CLASSIFICATION_PROMPT
 
@@ -18,14 +18,14 @@ async def classify_documents(pdf_path: str, model_name: str = "gemini-2.5-flash"
     except Exception:
         total_pages = 1000
 
-    pdf_file = genai.upload_file(pdf_path, mime_type="application/pdf")
-    model = genai.GenerativeModel(model_name)
+    pdf_file = client.files.upload(file=pdf_path, config={"mime_type": "application/pdf"})
     config = get_generation_config(response_schema=DocumentClassification)
     
     try:
-        response = await model.generate_content_async(
-            [CLASSIFICATION_PROMPT, pdf_file],
-            generation_config=config
+        response = await client.aio.models.generate_content(
+            model=model_name,
+            contents=[CLASSIFICATION_PROMPT, pdf_file],
+            config=config
         )
         raw_class = DocumentClassification.model_validate_json(response.text)
         
